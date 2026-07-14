@@ -2,6 +2,7 @@ package mysqlstore
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -115,6 +116,12 @@ func (s *SessionStore) Rotate(ctx context.Context, input user.RotateSessionInput
 			return user.RotateSessionResult{}, user.ErrInvalidRefresh
 		}
 		return user.RotateSessionResult{}, fmt.Errorf("rotate session: lock refresh token: %w", err)
+	}
+	// The unique binary lookup already narrows the row, while an explicit
+	// constant-time comparison keeps credential equality at this trust boundary
+	// independent of driver/database comparison behavior.
+	if !refreshDigestMatches(current.Digest, presentedDigest) {
+		return user.RotateSessionResult{}, user.ErrInvalidRefresh
 	}
 	session, err := tx.Session.WithContext(ctx).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
@@ -263,6 +270,13 @@ func persistRefreshReuse(ctx context.Context, tx *query.Query, session *model.Se
 		return fmt.Errorf("rotate session: revoke reused family: %w", err)
 	}
 	return nil
+}
+
+func refreshDigestMatches(stored, presented []byte) bool {
+	if len(stored) != 32 || len(presented) != 32 {
+		return false
+	}
+	return subtle.ConstantTimeCompare(stored, presented) == 1
 }
 
 func decodeRefreshDigest(value string) ([]byte, error) {

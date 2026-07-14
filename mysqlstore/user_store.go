@@ -104,18 +104,28 @@ func (s *UserStore) UpdateProfile(ctx context.Context, account *user.User, expec
 		return nil, errors.New("update user profile: user is required")
 	}
 	now := time.Now().UTC()
-	result, err := s.q.User.WithContext(ctx).
-		Where(s.q.User.ID.Eq(account.ID), s.q.User.Version.Eq(expectedVersion)).
-		UpdateSimple(
-			s.q.User.DisplayName.Value(account.Name),
-			s.q.User.Version.Add(1),
-			s.q.User.UpdatedAt.Value(now),
-		)
+	err := query.Use(s.db.WithContext(ctx)).Transaction(func(tx *query.Query) error {
+		result, err := tx.User.WithContext(ctx).
+			Where(tx.User.ID.Eq(account.ID), tx.User.Version.Eq(expectedVersion)).
+			UpdateSimple(
+				tx.User.DisplayName.Value(account.Name),
+				tx.User.Version.Add(1),
+				tx.User.UpdatedAt.Value(now),
+			)
+		if err != nil {
+			return fmt.Errorf("update user profile: %w", err)
+		}
+		if result.RowsAffected != 0 {
+			return nil
+		}
+		exists, err := userExists(ctx, tx, account.ID)
+		if err != nil {
+			return fmt.Errorf("update user profile: inspect update miss: %w", err)
+		}
+		return conditionalUpdateMissError(exists)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("update user profile: %w", err)
-	}
-	if result.RowsAffected == 0 {
-		return nil, user.ErrConflict
+		return nil, err
 	}
 	return s.ByID(ctx, account.ID)
 }
@@ -125,20 +135,45 @@ func (s *UserStore) UpdatePasswordHash(ctx context.Context, userID uint64, hash 
 		return nil, errors.New("update password hash: context is required")
 	}
 	now := time.Now().UTC()
-	result, err := s.q.User.WithContext(ctx).
-		Where(s.q.User.ID.Eq(userID), s.q.User.Version.Eq(expectedVersion)).
-		UpdateSimple(
-			s.q.User.PasswordHash.Value(hash),
-			s.q.User.Version.Add(1),
-			s.q.User.UpdatedAt.Value(now),
-		)
+	err := query.Use(s.db.WithContext(ctx)).Transaction(func(tx *query.Query) error {
+		result, err := tx.User.WithContext(ctx).
+			Where(tx.User.ID.Eq(userID), tx.User.Version.Eq(expectedVersion)).
+			UpdateSimple(
+				tx.User.PasswordHash.Value(hash),
+				tx.User.Version.Add(1),
+				tx.User.UpdatedAt.Value(now),
+			)
+		if err != nil {
+			return fmt.Errorf("update password hash: %w", err)
+		}
+		if result.RowsAffected != 0 {
+			return nil
+		}
+		exists, err := userExists(ctx, tx, userID)
+		if err != nil {
+			return fmt.Errorf("update password hash: inspect update miss: %w", err)
+		}
+		return conditionalUpdateMissError(exists)
+	})
 	if err != nil {
-		return nil, fmt.Errorf("update password hash: %w", err)
-	}
-	if result.RowsAffected == 0 {
-		return nil, user.ErrConflict
+		return nil, err
 	}
 	return s.ByID(ctx, userID)
+}
+
+func userExists(ctx context.Context, tx *query.Query, userID uint64) (bool, error) {
+	// Physical deletion is not part of the account model, so checking existence in
+	// the failed update's transaction cleanly separates a stale version from a
+	// caller referring to an account that never existed.
+	count, err := tx.User.WithContext(ctx).Where(tx.User.ID.Eq(userID)).Count()
+	return count > 0, err
+}
+
+func conditionalUpdateMissError(exists bool) error {
+	if exists {
+		return user.ErrConflict
+	}
+	return user.ErrNotFound
 }
 
 func (s *UserStore) List(ctx context.Context, filter user.ListFilter) (user.Page, error) {
@@ -525,9 +560,44 @@ func mapRoleLookupError(operation string, err error) error {
 func mapCreateUserError(err error) error {
 	var mysqlErr *mysqldriver.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
-		// Driver duplicate messages include the conflicting email; return only the
-		// stable domain category so storage failures do not disclose account input.
-		return fmt.Errorf("create user with role: %w", user.ErrEmailExists)
+		if mysqlDuplicateKeyName(mysqlErr.Message) == "uk_users_email" {
+			// Driver duplicate messages include the conflicting email; return only the
+			// stable domain category so storage failures do not disclose account input.
+			return fmt.Errorf("create user with role: %w", user.ErrEmailExists)
+		}
+		// Other duplicate constraints indicate a storage/schema problem rather than
+		// an email conflict. Preserve errors.As without exposing the duplicate value.
+		return &redactedStorageError{operation: "create user with role: duplicate database constraint", cause: err}
 	}
 	return fmt.Errorf("create user with role: insert user: %w", err)
 }
+
+func mysqlDuplicateKeyName(message string) string {
+	const marker = " for key "
+	index := strings.LastIndex(message, marker)
+	if index < 0 {
+		return ""
+	}
+	raw := strings.TrimSpace(message[index+len(marker):])
+	if len(raw) < 2 || (raw[0] != '\'' && raw[0] != '`') {
+		return ""
+	}
+	quote := raw[0]
+	end := strings.IndexByte(raw[1:], quote)
+	if end < 0 {
+		return ""
+	}
+	key := raw[1 : end+1]
+	if qualifier := strings.LastIndexByte(key, '.'); qualifier >= 0 {
+		key = key[qualifier+1:]
+	}
+	return key
+}
+
+type redactedStorageError struct {
+	operation string
+	cause     error
+}
+
+func (e *redactedStorageError) Error() string { return e.operation }
+func (e *redactedStorageError) Unwrap() error { return e.cause }
