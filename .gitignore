@@ -17,6 +17,9 @@
 # Go workspace file
 go.work
 
+# Agent worktrees are isolated checkouts and must never be committed.
+.worktrees/
+
 # Environment variables
 .env
 
@@ -52,4 +55,4 @@ build/
 
 # Temporary files
 tmp/
-temp/ 
+temp/
