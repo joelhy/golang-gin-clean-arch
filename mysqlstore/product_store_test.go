@@ -18,17 +18,24 @@ import (
 )
 
 func TestProductStore(t *testing.T) {
-	store := mustProductStore(t, newTestDB(t))
 	t.Run("CreateLookupListAndUpdate", func(t *testing.T) {
+		// Each integration subtest gets its own database so assertions cannot silently
+		// depend on rows created by a different subtest.
+		store := mustProductStore(t, newTestDB(t))
 		testProductStoreCreateLookupListAndUpdate(t, store)
 	})
 	t.Run("ListStableSorting", func(t *testing.T) {
+		// Sorting checks must validate only their local fixture; sharing state here masks
+		// order-dependent failures when this subtest runs by itself.
+		store := mustProductStore(t, newTestDB(t))
 		testProductStoreListStableSorting(t, store)
 	})
 	t.Run("UpdateAndAdjustStockErrorMapping", func(t *testing.T) {
+		store := mustProductStore(t, newTestDB(t))
 		testProductStoreUpdateAndAdjustStockErrorMapping(t, store)
 	})
 	t.Run("ConcurrentStockAdjustment", func(t *testing.T) {
+		store := mustProductStore(t, newTestDB(t))
 		testProductStoreConcurrentStockAdjustment(t, store)
 	})
 }
@@ -236,8 +243,8 @@ func testProductStoreListStableSorting(t *testing.T, store *ProductStore) {
 	if err != nil {
 		t.Fatalf("List(price desc) error = %v", err)
 	}
-	if len(page.Items) < 4 {
-		t.Fatalf("List(price desc) returned %d items, want at least 4", len(page.Items))
+	if page.Total != 3 || len(page.Items) != 3 {
+		t.Fatalf("List(price desc) = %+v", page)
 	}
 	positions := map[uint64]int{}
 	for index, item := range page.Items {
