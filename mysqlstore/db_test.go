@@ -35,8 +35,8 @@ func TestOpenConfiguresPoolPingsAndClosesOnce(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ParseDSN() error = %v", err)
 		}
-		if !parsed.MultiStatements {
-			t.Fatal("opener DSN must allow the embedded multi-statement migration")
+		if parsed.MultiStatements {
+			t.Fatal("application opener DSN must disable multi-statements")
 		}
 		if parsed.InterpolateParams {
 			t.Fatal("opener DSN must keep application parameter interpolation disabled")
@@ -81,6 +81,44 @@ func TestOpenConfiguresPoolPingsAndClosesOnce(t *testing.T) {
 	}
 }
 
+func TestOpenMigrationsUsesDedicatedMultiStatementPool(t *testing.T) {
+	connector := &stubConnector{}
+	sqlDB := sql.OpenDB(connector)
+	cfg := testDatabaseConfig()
+
+	got, closeDB, err := openMigrations(t.Context(), cfg, func(driverName, dsn string) (*sql.DB, error) {
+		if driverName != "mysql" {
+			t.Fatalf("driver name = %q, want mysql", driverName)
+		}
+		parsed, err := mysqlconfig.ParseDSN(dsn)
+		if err != nil {
+			t.Fatalf("ParseDSN() error = %v", err)
+		}
+		if !parsed.MultiStatements {
+			t.Fatal("migration opener DSN must enable multi-statements")
+		}
+		if parsed.InterpolateParams {
+			t.Fatal("migration opener DSN must keep parameter interpolation disabled")
+		}
+		return sqlDB, nil
+	})
+	if err != nil {
+		t.Fatalf("openMigrations() error = %v", err)
+	}
+	if got != sqlDB {
+		t.Fatal("openMigrations() returned a different SQL database")
+	}
+	if got := sqlDB.Stats().MaxOpenConnections; got != cfg.MaxOpen {
+		t.Fatalf("MaxOpenConnections = %d, want %d", got, cfg.MaxOpen)
+	}
+	if got := connector.pingCount(); got != 1 {
+		t.Fatalf("Ping count = %d, want 1", got)
+	}
+	if err := closeDB(); err != nil {
+		t.Fatalf("closeDB() error = %v", err)
+	}
+}
+
 func TestConfigurePoolAppliesEveryLimit(t *testing.T) {
 	cfg := testDatabaseConfig()
 	pool := &recordingPool{}
@@ -105,6 +143,9 @@ func TestOpenRedactsDSNAndDoesNotLogReturnedError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("open() error = nil, want failure")
+	}
+	if !errors.Is(err, ErrInitialize) {
+		t.Fatalf("open() error = %v, want ErrInitialize", err)
 	}
 	if db != nil {
 		t.Fatalf("open() returned database %v on error", db)
@@ -132,6 +173,9 @@ func TestOpenRedactsPingFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("open() error = nil, want ping failure")
 	}
+	if !errors.Is(err, ErrPing) {
+		t.Fatalf("open() error = %v, want ErrPing", err)
+	}
 	for _, secret := range []string{cfg.Password, cfg.DSN()} {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("open() ping error exposed secret %q: %v", secret, err)
@@ -153,6 +197,9 @@ func TestCloseRedactsDriverFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("closeDB() error = nil, want driver close failure")
 	}
+	if !errors.Is(err, ErrClose) {
+		t.Fatalf("closeDB() error = %v, want ErrClose", err)
+	}
 	for _, secret := range []string{cfg.Password, cfg.DSN()} {
 		if strings.Contains(err.Error(), secret) {
 			t.Fatalf("closeDB() error exposed secret %q: %v", secret, err)
@@ -165,6 +212,43 @@ func TestOpenRejectsNilContext(t *testing.T) {
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "context") {
 		t.Fatalf("Open() error = %v, want context validation error", err)
 	}
+}
+
+func TestOpenCategorizesInvalidConfig(t *testing.T) {
+	cfg := testDatabaseConfig()
+	cfg.Host = ""
+
+	_, _, err := open(t.Context(), cfg, slog.Default(), func(string) (*gorm.DB, error) {
+		t.Fatal("opener must not run for invalid config")
+		return nil, nil
+	})
+	if err == nil || !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("open() error = %v, want ErrInvalidConfig", err)
+	}
+}
+
+func TestOpenCategorizesSQLPoolFailure(t *testing.T) {
+	cfg := testDatabaseConfig()
+
+	_, _, err := open(t.Context(), cfg, slog.Default(), func(string) (*gorm.DB, error) {
+		return &gorm.DB{Config: &gorm.Config{}}, nil
+	})
+	if err == nil || !errors.Is(err, ErrSQLPool) {
+		t.Fatalf("open() error = %v, want ErrSQLPool", err)
+	}
+	assertErrorRedacted(t, err, cfg)
+}
+
+func TestOpenMigrationsRedactsInitializeFailure(t *testing.T) {
+	cfg := testDatabaseConfig()
+
+	_, _, err := openMigrations(t.Context(), cfg, func(string, string) (*sql.DB, error) {
+		return nil, fmt.Errorf("driver rejected %s", cfg.DSN())
+	})
+	if err == nil || !errors.Is(err, ErrInitialize) {
+		t.Fatalf("openMigrations() error = %v, want ErrInitialize", err)
+	}
+	assertErrorRedacted(t, err, cfg)
 }
 
 func TestModelTableNamesAndTransportIsolation(t *testing.T) {
@@ -214,6 +298,15 @@ func testDatabaseConfig() config.Database {
 		MaxOpen:         7,
 		ConnMaxLifetime: 15 * time.Minute,
 		ConnMaxIdleTime: 3 * time.Minute,
+	}
+}
+
+func assertErrorRedacted(t *testing.T, err error, cfg config.Database) {
+	t.Helper()
+	for _, secret := range []string{cfg.Password, cfg.DSN()} {
+		if strings.Contains(err.Error(), secret) {
+			t.Fatalf("error exposed secret %q: %v", secret, err)
+		}
 	}
 }
 

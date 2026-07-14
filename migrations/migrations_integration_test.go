@@ -3,15 +3,23 @@
 package migrations
 
 import (
+	"bytes"
 	"database/sql"
 	"slices"
+	"strings"
 	"testing"
 	"time"
+
+	"clean-arch-gin/mysqlstore/model"
+	"clean-arch-gin/mysqlstore/query"
 
 	mysqlconfig "github.com/go-sql-driver/mysql"
 	"github.com/testcontainers/testcontainers-go"
 	mysqlcontainer "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"github.com/testcontainers/testcontainers-go/wait"
+	gormmysql "gorm.io/driver/mysql"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
 )
 
 func TestMigrationsUpDown(t *testing.T) {
@@ -22,6 +30,7 @@ func TestMigrationsUpDown(t *testing.T) {
 	}
 	assertBusinessTables(t, db, requiredTables)
 	assertSeedData(t, db)
+	assertGeneratedQueriesAndConstraints(t, db)
 
 	// Re-running up verifies that the public boundary intentionally translates
 	// golang-migrate's ErrNoChange into a successful idempotent operation.
@@ -34,6 +43,113 @@ func TestMigrationsUpDown(t *testing.T) {
 	}
 	assertBusinessTables(t, db, nil)
 	assertCount(t, db, "SELECT COUNT(*) FROM schema_migrations", 0)
+}
+
+func assertGeneratedQueriesAndConstraints(t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	gormDB, err := gorm.Open(gormmysql.New(gormmysql.Config{
+		Conn:                      db,
+		SkipInitializeWithVersion: true,
+	}), &gorm.Config{
+		DisableAutomaticPing: true,
+		Logger:               logger.Discard,
+	})
+	if err != nil {
+		t.Fatalf("open GORM over migrated database: %v", err)
+	}
+	queries := query.Use(gormDB)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	user := &model.User{
+		Email:        "mapping@example.com",
+		DisplayName:  "Mapping User",
+		PasswordHash: "integration-only-hash",
+		Status:       "active",
+		Version:      1,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+	if err := queries.User.WithContext(t.Context()).Create(user); err != nil {
+		t.Fatalf("create user through generated query: %v", err)
+	}
+	gotUser, err := queries.User.WithContext(t.Context()).Where(queries.User.ID.Eq(user.ID)).First()
+	if err != nil {
+		t.Fatalf("read user through generated query: %v", err)
+	}
+	if gotUser.Email != user.Email || gotUser.DisplayName != user.DisplayName || gotUser.PasswordHash != user.PasswordHash || gotUser.Status != user.Status || gotUser.Version != user.Version {
+		t.Fatalf("generated user round trip = %+v, want persisted fields from %+v", gotUser, user)
+	}
+
+	description := "Generated query mapping product"
+	product := &model.Product{
+		SKU:         "MAP-SKU-1",
+		Name:        "Mapped Product",
+		Description: &description,
+		PriceAmount: 1250,
+		Currency:    "CNY",
+		Stock:       5,
+		Status:      "active",
+		Version:     1,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := queries.Product.WithContext(t.Context()).Create(product); err != nil {
+		t.Fatalf("create product through generated query: %v", err)
+	}
+	gotProduct, err := queries.Product.WithContext(t.Context()).Where(queries.Product.ID.Eq(product.ID)).First()
+	if err != nil {
+		t.Fatalf("read product through generated query: %v", err)
+	}
+	if gotProduct.SKU != product.SKU || gotProduct.Name != product.Name || gotProduct.Description == nil || *gotProduct.Description != description || gotProduct.PriceAmount != product.PriceAmount || gotProduct.Currency != product.Currency || gotProduct.Stock != product.Stock || gotProduct.Status != product.Status || gotProduct.Version != product.Version {
+		t.Fatalf("generated product round trip = %+v, want persisted fields from %+v", gotProduct, product)
+	}
+
+	assertExecFails(t, db, `
+		INSERT INTO orders (number, user_id, status, total_amount, currency, version)
+		VALUES (?, ?, ?, ?, ?, ?)`, "FK-MISSING-USER", uint64(999999), "pending", int64(0), "CNY", uint64(1))
+	assertExecFails(t, db, `
+		INSERT INTO products (sku, name, price_amount, currency, stock, status, version)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`, "NEGATIVE-PRICE", "Invalid Product", int64(-1), "CNY", uint32(0), "active", uint64(1))
+
+	result, err := db.ExecContext(t.Context(), `
+		INSERT INTO orders (number, user_id, status, total_amount, currency, version)
+		VALUES (?, ?, ?, ?, ?, ?)`, "VALID-ORDER", user.ID, "pending", product.PriceAmount, product.Currency, uint64(1))
+	if err != nil {
+		t.Fatalf("insert valid order: %v", err)
+	}
+	orderID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatalf("read valid order ID: %v", err)
+	}
+	assertExecFails(t, db, `
+		INSERT INTO order_items (
+			order_id, product_id, product_sku, product_name,
+			unit_price_amount, currency, quantity, subtotal_amount
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		orderID, product.ID, product.SKU, product.Name, product.PriceAmount, product.Currency, uint32(0), int64(0))
+
+	sessionID := strings.Repeat("s", 22)
+	if _, err := db.ExecContext(t.Context(), `
+		INSERT INTO sessions (id, user_id, rotation, expires_at)
+		VALUES (?, ?, ?, ?)`, sessionID, user.ID, uint64(0), now.Add(time.Hour)); err != nil {
+		t.Fatalf("insert valid session: %v", err)
+	}
+	digest := bytes.Repeat([]byte{0x42}, 32)
+	if _, err := db.ExecContext(t.Context(), `
+		INSERT INTO refresh_tokens (id, session_id, digest, expires_at)
+		VALUES (?, ?, ?, ?)`, strings.Repeat("a", 22), sessionID, digest, now.Add(time.Hour)); err != nil {
+		t.Fatalf("insert valid refresh token: %v", err)
+	}
+	assertExecFails(t, db, `
+		INSERT INTO refresh_tokens (id, session_id, digest, expires_at)
+		VALUES (?, ?, ?, ?)`, strings.Repeat("b", 22), sessionID, digest, now.Add(time.Hour))
+}
+
+func assertExecFails(t *testing.T, db *sql.DB, statement string, args ...any) {
+	t.Helper()
+	if _, err := db.ExecContext(t.Context(), statement, args...); err == nil {
+		t.Fatal("statement unexpectedly satisfied a database constraint")
+	}
 }
 
 func newIntegrationDatabase(t *testing.T) *sql.DB {
