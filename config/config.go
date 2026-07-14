@@ -54,11 +54,11 @@ var configDefaults = []configDefault{
 	{key: "jwt.audience", value: "clean-arch-api"},
 	{key: "jwt.access_ttl", value: 15 * time.Minute},
 	{key: "jwt.refresh_ttl", value: 7 * 24 * time.Hour},
-	{key: "password.memory", value: uint32(64 * 1024)},
-	{key: "password.iterations", value: uint32(3)},
-	{key: "password.parallelism", value: uint8(2)},
-	{key: "password.salt_length", value: uint32(16)},
-	{key: "password.key_length", value: uint32(32)},
+	{key: "password.memory", value: int64(64 * 1024)},
+	{key: "password.iterations", value: int64(3)},
+	{key: "password.parallelism", value: int64(2)},
+	{key: "password.salt_length", value: int64(16)},
+	{key: "password.key_length", value: int64(32)},
 	{key: "cors.allowed_origins", value: []string{}},
 	{key: "cors.allow_credentials", value: false},
 	{key: "rate_limit.login_requests_per_second", value: 1.0},
@@ -109,13 +109,14 @@ type JWT struct {
 	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
 }
 
-// Password contains bounded Argon2id work and output parameters.
+// Password contains bounded Argon2id work and output parameters. Signed wide
+// fields keep weak decoding from wrapping hostile negative or oversized input.
 type Password struct {
-	Memory      uint32 `mapstructure:"memory"`
-	Iterations  uint32 `mapstructure:"iterations"`
-	Parallelism uint8  `mapstructure:"parallelism"`
-	SaltLength  uint32 `mapstructure:"salt_length"`
-	KeyLength   uint32 `mapstructure:"key_length"`
+	Memory      int64 `mapstructure:"memory"`
+	Iterations  int64 `mapstructure:"iterations"`
+	Parallelism int64 `mapstructure:"parallelism"`
+	SaltLength  int64 `mapstructure:"salt_length"`
+	KeyLength   int64 `mapstructure:"key_length"`
 }
 
 // CORS contains the browser origins explicitly allowed to call the API.
@@ -224,6 +225,8 @@ func (d Database) DSN() string {
 func configureViper(v *viper.Viper) {
 	v.SetEnvPrefix("APP")
 	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
+	// Explicit empty values must outrank files/defaults so required settings fail closed.
+	v.AllowEmptyEnv(true)
 	v.AutomaticEnv()
 	for _, item := range configDefaults {
 		v.SetDefault(item.key, item.value)
@@ -390,6 +393,16 @@ func (c CORS) validate() error {
 		}
 		if parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
 			return fmt.Errorf("allowed origin %q must not contain a path, query, or fragment", origin)
+		}
+		// url.Parse accepts an empty hostname and does not enforce the TCP port range.
+		if parsed.Hostname() == "" {
+			return fmt.Errorf("allowed origin %q must contain a hostname", origin)
+		}
+		if port := parsed.Port(); port != "" {
+			portNumber, err := strconv.Atoi(port)
+			if err != nil || portNumber < 1 || portNumber > 65535 {
+				return fmt.Errorf("allowed origin %q port must be between 1 and 65535", origin)
+			}
 		}
 		if _, exists := seen[origin]; exists {
 			return fmt.Errorf("allowed origin %q is duplicated", origin)
