@@ -103,7 +103,7 @@ func TestListFilterValidate(t *testing.T) {
 func TestServiceListNormalizesFiltersAndDelegates(t *testing.T) {
 	store := newFakeStore()
 	store.listPage = Page{Items: []User{{ID: 1}}, Total: 1, Limit: 100, Offset: 2}
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 	filter := ListFilter{
 		Email: " Alice@Example.COM ", Name: " Alice ", Status: StatusActive,
 		Role: " CUSTOMER ", Sort: "name", Descending: true, Limit: 100, Offset: 2,
@@ -125,10 +125,35 @@ func TestServiceListNormalizesFiltersAndDelegates(t *testing.T) {
 	}
 }
 
+func TestServiceListReturnsDeepOwnedPage(t *testing.T) {
+	store := newFakeStore()
+	store.listPage = Page{
+		Items: []User{{
+			ID: 1, Name: "Joel",
+			Roles: []Role{{Name: RoleAdmin, Permissions: []Permission{{Name: PermissionUsersWrite}}}},
+		}},
+		Total: 1, Limit: 20,
+	}
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
+
+	got, err := service.List(t.Context(), Actor{Permissions: []string{PermissionUsersRead}}, ListFilter{Sort: "id", Limit: 20})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	got.Items[0].Name = "caller mutation"
+	got.Items[0].Roles[0].Name = RoleCustomer
+	got.Items[0].Roles[0].Permissions[0].Name = PermissionUsersRead
+
+	backing := store.listPage.Items[0]
+	if backing.Name != "Joel" || backing.Roles[0].Name != RoleAdmin || backing.Roles[0].Permissions[0].Name != PermissionUsersWrite {
+		t.Fatalf("caller mutation contaminated store page: %+v", store.listPage)
+	}
+}
+
 func TestServiceListFailsClosed(t *testing.T) {
 	t.Run("forbidden", func(t *testing.T) {
 		store := newFakeStore()
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		_, err := service.List(t.Context(), Actor{Permissions: []string{"users"}}, ListFilter{Sort: "id", Limit: 20})
 		if !errors.Is(err, ErrForbidden) {
@@ -141,7 +166,7 @@ func TestServiceListFailsClosed(t *testing.T) {
 
 	t.Run("invalid filter is not clamped", func(t *testing.T) {
 		store := newFakeStore()
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		_, err := service.List(t.Context(), Actor{Permissions: []string{PermissionUsersRead}}, ListFilter{Sort: "id", Limit: 101})
 		if err == nil {
@@ -155,7 +180,7 @@ func TestServiceListFailsClosed(t *testing.T) {
 
 func TestServiceSetStatus(t *testing.T) {
 	store := newFakeStore()
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 	input := SetStatusInput{UserID: 7, Status: StatusDisabled, ExpectedVersion: 3}
 
 	err := service.SetStatus(t.Context(), Actor{UserID: 9, Permissions: []string{PermissionUsersWrite}}, input)
@@ -199,7 +224,7 @@ func TestServiceSetStatusRejectsUnauthorizedInvalidAndLastAdmin(t *testing.T) {
 			if tt.configure != nil {
 				tt.configure(store)
 			}
-			service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+			service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 			err := service.SetStatus(t.Context(), tt.actor, tt.input)
 			if !errors.Is(err, tt.wantErr) {
@@ -216,7 +241,7 @@ func TestServiceSetStatusPropagatesPreflightAndWriteErrors(t *testing.T) {
 	t.Run("preflight not found", func(t *testing.T) {
 		store := newFakeStore()
 		store.lastAdminErr = fmt.Errorf("inspect target: %w", ErrNotFound)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		err := service.SetStatus(t.Context(), Actor{Permissions: []string{PermissionUsersWrite}}, SetStatusInput{
 			UserID: 404, Status: StatusDisabled, ExpectedVersion: 1,
@@ -229,7 +254,7 @@ func TestServiceSetStatusPropagatesPreflightAndWriteErrors(t *testing.T) {
 	t.Run("optimistic conflict", func(t *testing.T) {
 		store := newFakeStore()
 		store.setStatusErr = fmt.Errorf("update: %w", ErrConflict)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		err := service.SetStatus(t.Context(), Actor{Permissions: []string{PermissionUsersWrite}}, SetStatusInput{
 			UserID: 7, Status: StatusActive, ExpectedVersion: 2,
@@ -242,7 +267,7 @@ func TestServiceSetStatusPropagatesPreflightAndWriteErrors(t *testing.T) {
 
 func TestServiceReplaceRolesNormalizesDeduplicatesAndSorts(t *testing.T) {
 	store := newFakeStore()
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 	input := ReplaceRolesInput{UserID: 7, Roles: []string{" Customer ", "admin", "CUSTOMER"}, ExpectedVersion: 5}
 
 	err := service.ReplaceRoles(t.Context(), Actor{UserID: 9, Permissions: []string{PermissionUsersRoles}}, input)
@@ -274,7 +299,8 @@ func TestServiceReplaceRolesValidatesAuthorizationAndRoles(t *testing.T) {
 	}{
 		{name: "forbidden", actor: Actor{Permissions: []string{"users:write"}}, roles: []string{RoleCustomer}, wantErr: ErrForbidden},
 		{name: "requires one role", actor: Actor{Permissions: []string{PermissionUsersRoles}}, roles: nil, wantErr: ErrRoleNotFound},
-		{name: "blank role", actor: Actor{Permissions: []string{PermissionUsersRoles}}, roles: []string{" "}, wantErr: ErrRoleNotFound},
+		{name: "normalized empty role", actor: Actor{Permissions: []string{PermissionUsersRoles}}, roles: []string{" \t "}, wantErr: ErrRoleNotFound},
+		{name: "invalid UTF-8 role", actor: Actor{Permissions: []string{PermissionUsersRoles}}, roles: []string{string([]byte{0xff})}, wantErr: ErrRoleNotFound},
 		{
 			name: "unknown role", actor: Actor{Permissions: []string{PermissionUsersRoles}}, roles: []string{"operator"},
 			configure: func(store *fakeStore) { store.rolesExist = false }, wantErr: ErrRoleNotFound,
@@ -287,7 +313,7 @@ func TestServiceReplaceRolesValidatesAuthorizationAndRoles(t *testing.T) {
 			if tt.configure != nil {
 				tt.configure(store)
 			}
-			service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+			service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 			err := service.ReplaceRoles(t.Context(), tt.actor, ReplaceRolesInput{UserID: 7, Roles: tt.roles, ExpectedVersion: 1})
 			if !errors.Is(err, tt.wantErr) {
@@ -303,7 +329,7 @@ func TestServiceReplaceRolesValidatesAuthorizationAndRoles(t *testing.T) {
 func TestServiceReplaceRolesProtectsLastActiveAdmin(t *testing.T) {
 	store := newFakeStore()
 	store.lastActiveAdmin = true
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	err := service.ReplaceRoles(t.Context(), Actor{Permissions: []string{PermissionUsersRoles}}, ReplaceRolesInput{
 		UserID: 7, Roles: []string{RoleCustomer}, ExpectedVersion: 2,
@@ -320,7 +346,7 @@ func TestServiceReplaceRolesPropagatesRoleLookupAndConflict(t *testing.T) {
 	t.Run("role lookup not found", func(t *testing.T) {
 		store := newFakeStore()
 		store.rolesExistErr = fmt.Errorf("query roles: %w", ErrNotFound)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		err := service.ReplaceRoles(t.Context(), Actor{Permissions: []string{PermissionUsersRoles}}, ReplaceRolesInput{
 			UserID: 7, Roles: []string{RoleCustomer}, ExpectedVersion: 1,
@@ -333,7 +359,7 @@ func TestServiceReplaceRolesPropagatesRoleLookupAndConflict(t *testing.T) {
 	t.Run("optimistic conflict", func(t *testing.T) {
 		store := newFakeStore()
 		store.replaceErr = fmt.Errorf("replace: %w", ErrConflict)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		err := service.ReplaceRoles(t.Context(), Actor{Permissions: []string{PermissionUsersRoles}}, ReplaceRolesInput{
 			UserID: 7, Roles: []string{RoleAdmin}, ExpectedVersion: 4,
@@ -347,7 +373,7 @@ func TestServiceReplaceRolesPropagatesRoleLookupAndConflict(t *testing.T) {
 func TestServicePermissionsDelegatesAndPreservesErrors(t *testing.T) {
 	store := newFakeStore()
 	store.permissions = []string{PermissionUsersRead, PermissionProductsWrite}
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	got, err := service.Permissions(t.Context(), 7)
 	if err != nil {
@@ -358,6 +384,10 @@ func TestServicePermissionsDelegatesAndPreservesErrors(t *testing.T) {
 	}
 	if store.permissionsCalls != 1 || store.permissionsID != 7 {
 		t.Fatalf("Permissions() store calls/id = %d/%d, want 1/7", store.permissionsCalls, store.permissionsID)
+	}
+	got[0] = PermissionUsersRoles
+	if store.permissions[0] != PermissionUsersRead {
+		t.Fatalf("caller mutation contaminated store permissions: %v", store.permissions)
 	}
 
 	store.permissionsErr = fmt.Errorf("permissions lookup: %w", ErrNotFound)

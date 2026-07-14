@@ -133,14 +133,23 @@ type Store interface {
 	CreateWithRole(context.Context, *User, string) error
 	ByID(context.Context, uint64) (*User, error)
 	ByEmail(context.Context, string) (*User, error)
-	UpdateProfile(context.Context, *User, uint64) error
+	UpdateProfile(context.Context, *User, uint64) (*User, error)
 	List(context.Context, ListFilter) (Page, error)
-	// SetStatus and ReplaceRoles must enforce the last-active-admin invariant again
-	// in the same transaction as the write. The service preflight improves error
-	// reporting but cannot prevent two concurrent requests from both passing it.
+	// SetStatus must acquire the same shared serialization guard as ReplaceRoles
+	// before recounting active admins and writing. Locking the stable admin-role row,
+	// an advisory lock, or a serializable equivalent prevents two transactions that
+	// each saw two admins from concurrently disabling different accounts.
 	SetStatus(context.Context, uint64, Status, uint64) error
+	// ReplaceRoles uses the same guard and lock order as SetStatus, then recounts and
+	// writes in that transaction. A plain transaction without this shared guard still
+	// permits last-admin write-skew.
 	ReplaceRoles(context.Context, uint64, []string, uint64) error
+	// RoleNamesExist reports true only when every normalized role name exists.
 	RoleNamesExist(context.Context, []string) (bool, error)
+	// IsLastActiveAdmin is a service preflight for quick business feedback only; its
+	// result cannot provide concurrency safety after this call returns. Task 5 must
+	// integration-test concurrent two-admin disable and admin-role-removal attempts,
+	// proving the shared write guard lets at most one revocation commit.
 	IsLastActiveAdmin(context.Context, uint64) (bool, error)
 	Permissions(context.Context, uint64) ([]string, error)
 }
