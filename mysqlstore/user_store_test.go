@@ -139,6 +139,47 @@ func TestUserStoreConcurrentRoleRemovalKeepsOneAdmin(t *testing.T) {
 	assertActiveAdminCount(t, store, first.ID, second.ID)
 }
 
+func TestUserStoreIsLastActiveAdminHonorsStatusAndRole(t *testing.T) {
+	store := mustUserStore(t, newTestDB(t))
+	admin := createStoredUser(t, store, "last-admin@example.com", user.RoleAdmin)
+	otherAdmin := createStoredUser(t, store, "other-admin@example.com", user.RoleAdmin)
+	customer := createStoredUser(t, store, "customer-only@example.com", user.RoleCustomer)
+
+	last, err := store.IsLastActiveAdmin(t.Context(), customer.ID)
+	if err != nil {
+		t.Fatalf("IsLastActiveAdmin(customer) error = %v", err)
+	}
+	if last {
+		t.Fatal("IsLastActiveAdmin(customer) = true, want false")
+	}
+
+	if err := store.SetStatus(t.Context(), admin.ID, user.StatusDisabled, 1); err != nil {
+		t.Fatalf("SetStatus(disable admin) error = %v", err)
+	}
+	last, err = store.IsLastActiveAdmin(t.Context(), admin.ID)
+	if err != nil {
+		t.Fatalf("IsLastActiveAdmin(disabled admin) error = %v", err)
+	}
+	if last {
+		t.Fatal("IsLastActiveAdmin(disabled admin) = true, want false")
+	}
+
+	if err := store.SetStatus(t.Context(), admin.ID, user.StatusActive, 2); err != nil {
+		t.Fatalf("SetStatus(re-enable admin) error = %v", err)
+	}
+	if err := store.SetStatus(t.Context(), otherAdmin.ID, user.StatusDisabled, 1); err != nil {
+		t.Fatalf("SetStatus(disable other admin) error = %v", err)
+	}
+
+	last, err = store.IsLastActiveAdmin(t.Context(), admin.ID)
+	if err != nil {
+		t.Fatalf("IsLastActiveAdmin(active admin) error = %v", err)
+	}
+	if !last {
+		t.Fatal("IsLastActiveAdmin(active admin) = false, want true")
+	}
+}
+
 func runConcurrentAdminWrites(write func(int) error) []error {
 	start := make(chan struct{})
 	ready := sync.WaitGroup{}

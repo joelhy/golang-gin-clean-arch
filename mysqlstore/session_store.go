@@ -360,9 +360,14 @@ func normalizedTokenTime(value, fallback time.Time) time.Time {
 func mapRefreshWriteError(operation string, err error) error {
 	var mysqlErr *mysqldriver.MySQLError
 	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1062 {
-		// Duplicate digest messages contain credential-derived bytes; collapse them
-		// to the stable invalid-refresh category without retaining driver text.
-		return fmt.Errorf("%s: %w", operation, user.ErrInvalidRefresh)
+		if mysqlDuplicateKeyName(mysqlErr.Message) == "uk_refresh_tokens_digest" {
+			// Duplicate digest messages contain credential-derived bytes; collapse them
+			// to the stable invalid-refresh category without retaining driver text.
+			return fmt.Errorf("%s: %w", operation, user.ErrInvalidRefresh)
+		}
+		// Other duplicate constraints signal an unexpected storage write failure.
+		// Keep the driver error available to errors.As while redacting duplicate values.
+		return &redactedStorageError{operation: operation + ": duplicate database constraint", cause: err}
 	}
 	return fmt.Errorf("%s: %w", operation, err)
 }
