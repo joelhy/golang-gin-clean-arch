@@ -58,6 +58,56 @@ type Identity struct {
 	TokenID   string
 }
 
+// Session represents one refresh-token family. Rotation is monotonic and lets
+// persistence reject stale concurrent refreshes without trusting bearer input.
+type Session struct {
+	ID              string
+	UserID          uint64
+	Rotation        uint64
+	ExpiresAt       time.Time
+	RevokedAt       *time.Time
+	ReuseDetectedAt *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+// RefreshToken carries only a one-way digest at the persistence boundary. Raw
+// bearer material exists only in Tokens returned to the caller.
+type RefreshToken struct {
+	ID           string
+	SessionID    string
+	Digest       string
+	ExpiresAt    time.Time
+	ConsumedAt   *time.Time
+	RevokedAt    *time.Time
+	ReplacedByID string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+type Tokens struct {
+	AccessToken      string
+	RefreshToken     string
+	AccessExpiresAt  time.Time
+	RefreshExpiresAt time.Time
+}
+
+type LoginInput struct {
+	Email    string
+	Password string
+}
+
+type RotateSessionInput struct {
+	Digest   string
+	Now      time.Time
+	NewToken *RefreshToken
+}
+
+type RotateSessionResult struct {
+	Session      *Session
+	RefreshToken *RefreshToken
+}
+
 type Actor struct {
 	UserID      uint64
 	Permissions []string
@@ -158,6 +208,36 @@ type Passwords interface {
 	Hash(string) (string, error)
 	Verify(encoded, password string) (bool, error)
 	NeedsRehash(string) bool
+}
+
+// AuthUserStore is intentionally narrower than Store because authentication
+// must not gain account-administration writes through its persistence port.
+type AuthUserStore interface {
+	ByEmail(context.Context, string) (*User, error)
+	ByID(context.Context, uint64) (*User, error)
+	UpdatePasswordHash(context.Context, uint64, string, uint64) (*User, error)
+	Permissions(context.Context, uint64) ([]string, error)
+}
+
+type SessionStore interface {
+	Create(context.Context, *Session, *RefreshToken) error
+	Active(context.Context, string, uint64, time.Time) (*Session, error)
+	Rotate(context.Context, RotateSessionInput) (RotateSessionResult, error)
+	Revoke(context.Context, string, uint64, time.Time) error
+}
+
+type AccessTokens interface {
+	Issue(Identity, time.Time) (string, time.Time, error)
+	Parse(string, time.Time) (Identity, error)
+}
+
+type RefreshTokens interface {
+	Generate() (raw, digest string, err error)
+	Digest(string) string
+}
+
+type IDGenerator interface {
+	NewID() (string, error)
 }
 
 type Clock interface {
