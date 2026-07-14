@@ -61,9 +61,19 @@ func TestUserStoreMappingUniqueListAndVersion(t *testing.T) {
 	if _, err := store.UpdateProfile(t.Context(), got, 1); !errors.Is(err, user.ErrConflict) {
 		t.Fatalf("stale UpdateProfile() error = %v, want ErrConflict", err)
 	}
+	missing := &user.User{ID: ^uint64(0), Name: "Missing"}
+	if _, err := store.UpdateProfile(t.Context(), missing, 1); !errors.Is(err, user.ErrNotFound) {
+		t.Fatalf("missing UpdateProfile() error = %v, want ErrNotFound", err)
+	}
 	passwordUpdated, err := store.UpdatePasswordHash(t.Context(), admin.ID, "new-encoded", 2)
 	if err != nil || passwordUpdated.PasswordHash != "new-encoded" || passwordUpdated.Version != 3 {
 		t.Fatalf("UpdatePasswordHash() = (%+v, %v)", passwordUpdated, err)
+	}
+	if _, err := store.UpdatePasswordHash(t.Context(), admin.ID, "stale-encoded", 2); !errors.Is(err, user.ErrConflict) {
+		t.Fatalf("stale UpdatePasswordHash() error = %v, want ErrConflict", err)
+	}
+	if _, err := store.UpdatePasswordHash(t.Context(), ^uint64(0), "missing-encoded", 1); !errors.Is(err, user.ErrNotFound) {
+		t.Fatalf("missing UpdatePasswordHash() error = %v, want ErrNotFound", err)
 	}
 
 	customer := createStoredUser(t, store, "customer@example.com", user.RoleCustomer)

@@ -1,6 +1,7 @@
 package mysqlstore
 
 import (
+	"bytes"
 	"database/sql"
 	"errors"
 	"strings"
@@ -9,6 +10,33 @@ import (
 
 	"clean-arch-gin/user"
 )
+
+func TestRefreshDigestMatchesRequiresExact32ByteDigest(t *testing.T) {
+	digest := bytes.Repeat([]byte{0x42}, 32)
+	different := bytes.Clone(digest)
+	different[31] ^= 0xff
+
+	tests := []struct {
+		name      string
+		stored    []byte
+		presented []byte
+		want      bool
+	}{
+		{name: "equal", stored: digest, presented: bytes.Clone(digest), want: true},
+		{name: "different", stored: digest, presented: different},
+		{name: "short stored", stored: digest[:31], presented: digest},
+		{name: "short presented", stored: digest, presented: digest[:31]},
+		{name: "long stored", stored: append(bytes.Clone(digest), 0), presented: digest},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := refreshDigestMatches(tt.stored, tt.presented); got != tt.want {
+				t.Fatalf("refreshDigestMatches() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
 
 func TestNewSessionStoreRejectsNilDatabase(t *testing.T) {
 	store, err := NewSessionStore(nil)
