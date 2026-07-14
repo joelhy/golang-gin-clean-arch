@@ -176,11 +176,15 @@ func parsePasswordHash(encoded string, limits passwordParameters) (passwordParam
 	}
 
 	salt, err := base64.RawStdEncoding.Strict().DecodeString(fields[4])
-	if err != nil || len(salt) < minimumParsedSaltLength || len(salt) > maximumPasswordSaltLength {
+	// DecodeString intentionally ignores CR/LF even in Strict mode. Re-encoding
+	// must match byte-for-byte so non-canonical fields cannot reach Argon2.
+	if err != nil || len(salt) < minimumParsedSaltLength || len(salt) > maximumPasswordSaltLength ||
+		base64.RawStdEncoding.EncodeToString(salt) != fields[4] {
 		return passwordParameters{}, nil, nil, ErrInvalidPasswordHash
 	}
 	hash, err := base64.RawStdEncoding.Strict().DecodeString(fields[5])
-	if err != nil || len(hash) < minimumPasswordKeyLength || len(hash) > maximumPasswordKeyLength {
+	if err != nil || len(hash) < minimumPasswordKeyLength || len(hash) > maximumPasswordKeyLength ||
+		base64.RawStdEncoding.EncodeToString(hash) != fields[5] {
 		return passwordParameters{}, nil, nil, ErrInvalidPasswordHash
 	}
 	parameters.saltLength = uint32(len(salt))
