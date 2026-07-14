@@ -169,6 +169,104 @@ jwt:
 	}
 }
 
+func TestLoadWithRejectsInvalidArgon2Numbers(t *testing.T) {
+	tests := []struct {
+		name    string
+		field   string
+		value   string
+		wantErr string
+	}{
+		{name: "negative memory", field: "memory", value: "-4294901760", wantErr: "memory"},
+		{name: "overflow memory", field: "memory", value: "4295032832", wantErr: "memory"},
+		{name: "negative iterations", field: "iterations", value: "-4294967293", wantErr: "iterations"},
+		{name: "overflow iterations", field: "iterations", value: "4294967299", wantErr: "iterations"},
+		{name: "negative parallelism", field: "parallelism", value: "-254", wantErr: "parallelism"},
+		{name: "overflow parallelism", field: "parallelism", value: "258", wantErr: "parallelism"},
+		{name: "negative salt length", field: "salt_length", value: "-4294967280", wantErr: "salt length"},
+		{name: "overflow salt length", field: "salt_length", value: "4294967312", wantErr: "salt length"},
+		{name: "negative key length", field: "key_length", value: "-4294967264", wantErr: "key length"},
+		{name: "overflow key length", field: "key_length", value: "4294967328", wantErr: "key length"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setConfigEnv(t, map[string]string{})
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			contents := []byte("jwt:\n  key: 0123456789abcdef0123456789abcdef\npassword:\n  " + tt.field + ": " + tt.value + "\n")
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			v := NewViper()
+			v.SetConfigFile(path)
+			_, err := LoadWith(v)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadWithEmptyEnvironmentOverridesConfigFile(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantErr string
+	}{
+		{name: "empty HTTP address", key: "APP_HTTP_ADDRESS", wantErr: "address is required"},
+		{name: "empty JWT key", key: "APP_JWT_KEY", wantErr: "jwt key is required"},
+		{name: "empty JWT issuer", key: "APP_JWT_ISSUER", wantErr: "issuer is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setConfigEnv(t, with(validEnv(), tt.key, ""))
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			contents := []byte(`
+http:
+  address: 127.0.0.1:8090
+jwt:
+  key: abcdef0123456789abcdef0123456789
+  issuer: file-issuer
+`)
+			if err := os.WriteFile(path, contents, 0o600); err != nil {
+				t.Fatalf("WriteFile() error = %v", err)
+			}
+
+			v := NewViper()
+			v.SetConfigFile(path)
+			_, err := LoadWith(v)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadWithRejectsInvalidCORSOrigins(t *testing.T) {
+	tests := []struct {
+		name    string
+		origin  string
+		wantErr string
+	}{
+		{name: "missing hostname", origin: "https://:443", wantErr: "hostname"},
+		{name: "zero port", origin: "https://example.com:0", wantErr: "port"},
+		{name: "out of range port", origin: "https://example.com:65536", wantErr: "port"},
+		{name: "non-numeric port", origin: "https://example.com:http", wantErr: "absolute http/https URL"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setConfigEnv(t, with(validEnv(), "APP_CORS_ALLOWED_ORIGINS", tt.origin))
+
+			_, err := LoadWith(NewViper())
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadWithUsesFlagEnvironmentFilePriority(t *testing.T) {
 	setConfigEnv(t, with(validEnv(), "APP_HTTP_ADDRESS", "127.0.0.1:8082"))
 	path := filepath.Join(t.TempDir(), "config.yaml")
@@ -221,11 +319,38 @@ func TestDatabaseDSN(t *testing.T) {
 
 func setConfigEnv(t *testing.T, env map[string]string) {
 	t.Helper()
+	original := make(map[string]struct {
+		value string
+		set   bool
+	}, len(allConfigEnvKeys()))
 	for _, key := range allConfigEnvKeys() {
-		t.Setenv(key, "")
+		value, set := os.LookupEnv(key)
+		original[key] = struct {
+			value string
+			set   bool
+		}{value: value, set: set}
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("Unsetenv(%q) error = %v", key, err)
+		}
 	}
+	t.Cleanup(func() {
+		for _, key := range allConfigEnvKeys() {
+			state := original[key]
+			var err error
+			if state.set {
+				err = os.Setenv(key, state.value)
+			} else {
+				err = os.Unsetenv(key)
+			}
+			if err != nil {
+				t.Errorf("restoring environment variable %q: %v", key, err)
+			}
+		}
+	})
 	for key, value := range env {
-		t.Setenv(key, value)
+		if err := os.Setenv(key, value); err != nil {
+			t.Fatalf("Setenv(%q) error = %v", key, err)
+		}
 	}
 }
 
