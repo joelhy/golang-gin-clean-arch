@@ -14,6 +14,7 @@ var (
 	ErrLastAdmin          = errors.New("cannot modify the last active admin")
 	ErrConflict           = errors.New("conflict")
 	ErrInvalidCredentials = errors.New("invalid credentials")
+	ErrInvalidAccessToken = errors.New("invalid access token")
 	ErrInvalidRefresh     = errors.New("invalid refresh token")
 	ErrRefreshReuse       = errors.New("refresh token reuse detected")
 	ErrSessionExpired     = errors.New("session expired")

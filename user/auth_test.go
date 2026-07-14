@@ -378,6 +378,41 @@ func TestAuthAuthenticateMapsInactiveSessionAndAccount(t *testing.T) {
 	}
 }
 
+func TestAuthAuthenticateWrapsInvalidAccessToken(t *testing.T) {
+	tests := []struct {
+		name          string
+		parseIdentity Identity
+		parseErr      error
+	}{
+		{name: "parse failure", parseErr: errors.New("token parse failed: signed-access-token")},
+		{name: "missing user id", parseIdentity: Identity{SessionID: "session-id", TokenID: "access-id"}},
+		{name: "missing session id", parseIdentity: Identity{UserID: 7, TokenID: "access-id"}},
+		{name: "missing token id", parseIdentity: Identity{UserID: 7, SessionID: "session-id"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			service := newTestAuthService(t,
+				&authFakeUsers{},
+				&authFakeSessions{},
+				&authFakePasswords{},
+				&authFakeAccess{parseIdentity: tt.parseIdentity, parseErr: tt.parseErr},
+				&authFakeRefresh{},
+				&authFakeIDs{},
+				time.Hour,
+			)
+
+			_, err := service.Authenticate(t.Context(), testAccessRaw)
+			if !errors.Is(err, ErrInvalidAccessToken) {
+				t.Fatalf("Authenticate() error = %v, want ErrInvalidAccessToken", err)
+			}
+			if strings.Contains(err.Error(), testAccessRaw) {
+				t.Fatal("Authenticate() error exposed bearer token")
+			}
+		})
+	}
+}
+
 func TestAuthAuthorizeLoadsPermissionsOnEveryCallAndMatchesExactly(t *testing.T) {
 	users := &authFakeUsers{permissions: []string{"users:write", "users:read", "users:write"}}
 	service := newTestAuthService(t, users, &authFakeSessions{}, &authFakePasswords{}, &authFakeAccess{}, &authFakeRefresh{}, &authFakeIDs{}, time.Hour)
@@ -411,7 +446,7 @@ func TestAuthRefreshRotatesAtomicallyAndIssuesAccess(t *testing.T) {
 	access := &authFakeAccess{issueRaw: testAccessRaw, issueExpiry: now.Add(15 * time.Minute)}
 	refresh := &authFakeRefresh{raw: "new-raw-refresh", digest: replaced.Digest}
 	ids := &authFakeIDs{ids: []string{"new-refresh-id", "new-access-id"}}
-	service := newTestAuthService(t, &authFakeUsers{}, sessions, &authFakePasswords{}, access, refresh, ids, time.Hour)
+	service := newTestAuthService(t, &authFakeUsers{byIDUser: &User{ID: 7, Status: StatusActive}}, sessions, &authFakePasswords{}, access, refresh, ids, time.Hour)
 
 	got, err := service.Refresh(t.Context(), testRefreshRaw)
 	if err != nil {
@@ -444,6 +479,52 @@ func TestAuthRefreshReturnsStableErrorsWithoutBearerLeak(t *testing.T) {
 			}
 			if strings.Contains(err.Error(), testRefreshRaw) || strings.Contains(err.Error(), "new-raw") {
 				t.Fatal("Refresh() error exposed bearer token")
+			}
+		})
+	}
+}
+
+func TestAuthRefreshRevokesRotatedSessionWhenAccountMissingOrDisabled(t *testing.T) {
+	now := fixedTime.UTC()
+	session := &Session{ID: "session-id", UserID: 7, Rotation: 2, ExpiresAt: now.Add(time.Hour)}
+	replaced := &RefreshToken{ID: "new-refresh-id", SessionID: session.ID, Digest: strings.Repeat("b", 64), ExpiresAt: now.Add(45 * time.Minute)}
+
+	tests := []struct {
+		name    string
+		user    *User
+		userErr error
+		want    error
+	}{
+		{name: "missing user", userErr: ErrNotFound, want: ErrSessionRevoked},
+		{name: "disabled user", user: &User{ID: 7, Status: StatusDisabled}, want: ErrDisabled},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			users := &authFakeUsers{byIDUser: tt.user, byIDErr: tt.userErr}
+			sessions := &authFakeSessions{rotateResult: RotateSessionResult{Session: session, RefreshToken: replaced}}
+			service := newTestAuthService(t,
+				users,
+				sessions,
+				&authFakePasswords{},
+				&authFakeAccess{issueRaw: testAccessRaw, issueExpiry: now.Add(15 * time.Minute)},
+				&authFakeRefresh{raw: "new-raw-refresh", digest: replaced.Digest},
+				&authFakeIDs{ids: []string{"new-refresh-id"}},
+				time.Hour,
+			)
+
+			got, err := service.Refresh(t.Context(), testRefreshRaw)
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("Refresh() error = %v, want %v", err, tt.want)
+			}
+			if got != (Tokens{}) {
+				t.Fatalf("Refresh() tokens = %+v, want zero", got)
+			}
+			if users.byIDInput != 7 {
+				t.Fatalf("ByID() input = %d, want 7", users.byIDInput)
+			}
+			if sessions.revokeInput != (Identity{UserID: 7, SessionID: "session-id"}) || !sessions.revokeNow.Equal(now) {
+				t.Fatalf("Revoke() input = %+v at %v", sessions.revokeInput, sessions.revokeNow)
 			}
 		})
 	}
