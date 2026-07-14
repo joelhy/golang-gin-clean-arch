@@ -89,3 +89,42 @@ Skipped:
 - `Update` deliberately excludes `stock` writes and documents why, keeping inventory mutations confined to the stock ledger transaction.
 - `AdjustStock` locks the product row before computing the new stock and writes the product row plus ledger entry in one transaction, which prevents negative stock under concurrent decrements.
 - No open functional concerns after the required verification commands.
+
+## Task 7 review follow-up
+
+### Additional coverage
+
+- Added an `AdjustStock` integration assertion for a stale `Version` conflict where stock is still sufficient, verifying `product.ErrConflict` and that the failed attempt does not insert another `stock_adjustments` row.
+- Added `List` integration assertions covering `activeOnly=false` with `StatusDraft`, plus `activeOnly=true` overriding conflicting `StatusDraft` and `StatusInactive` filters to return only active rows.
+
+### TDD result
+
+- Followed the required test-first flow for the review findings by adding the missing integration coverage and running the focused integration command before any production edits.
+- The focused integration run passed immediately, so this was a coverage-only GREEN and `mysqlstore/product_store.go` did not require changes.
+
+### Verification
+
+`timeout 300s go test -count=1 -tags=integration ./mysqlstore -run TestProductStore -v`
+
+```text
+=== RUN   TestProductStore
+=== RUN   TestProductStore/CreateLookupListAndUpdate
+=== RUN   TestProductStore/ListStableSorting
+=== RUN   TestProductStore/UpdateAndAdjustStockErrorMapping
+=== RUN   TestProductStore/ConcurrentStockAdjustment
+--- PASS: TestProductStore (22.89s)
+    --- PASS: TestProductStore/CreateLookupListAndUpdate (0.07s)
+    --- PASS: TestProductStore/ListStableSorting (0.03s)
+    --- PASS: TestProductStore/UpdateAndAdjustStockErrorMapping (0.05s)
+    --- PASS: TestProductStore/ConcurrentStockAdjustment (0.03s)
+PASS
+ok  	clean-arch-gin/mysqlstore	22.952s
+```
+
+`go test -count=1 ./...`
+
+- exit 0
+
+`go vet ./mysqlstore/...`
+
+- exit 0
