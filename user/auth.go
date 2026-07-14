@@ -140,11 +140,11 @@ func (s *AuthService) startSession(ctx context.Context, userID uint64) (Tokens, 
 
 	accessID, err := s.ids.NewID()
 	if err != nil {
-		return Tokens{}, s.revokeAfterIssueFailure(ctx, session, now, fmt.Errorf("generate access ID: %w", err))
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "login", session, now, fmt.Errorf("generate access ID: %w", err))
 	}
 	rawAccess, accessExpiry, err := s.access.Issue(Identity{UserID: userID, SessionID: sessionID, TokenID: accessID}, now)
 	if err != nil {
-		return Tokens{}, s.revokeAfterIssueFailure(ctx, session, now, errors.New("issue access token"))
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "login", session, now, errors.New("issue access token"))
 	}
 	return Tokens{
 		AccessToken: rawAccess, RefreshToken: rawRefresh,
@@ -158,10 +158,10 @@ func (s *AuthService) Authenticate(ctx context.Context, rawAccess string) (Ident
 	if err != nil {
 		// Access-token parser errors can contain attacker-controlled bearer fragments;
 		// retain a safe operation category without returning parser text.
-		return Identity{}, errors.New("authenticate: invalid access token")
+		return Identity{}, fmt.Errorf("authenticate: %w", ErrInvalidAccessToken)
 	}
 	if identity.UserID == 0 || identity.SessionID == "" || identity.TokenID == "" {
-		return Identity{}, errors.New("authenticate: invalid access token")
+		return Identity{}, fmt.Errorf("authenticate: %w", ErrInvalidAccessToken)
 	}
 
 	session, err := s.sessions.Active(ctx, identity.SessionID, identity.UserID, now)
@@ -232,16 +232,31 @@ func (s *AuthService) Refresh(ctx context.Context, rawRefresh string) (Tokens, e
 	if rotated.Session == nil || rotated.RefreshToken == nil || rotated.Session.ID == "" || rotated.Session.UserID == 0 {
 		return Tokens{}, ErrInvalidRefresh
 	}
+	account, err := s.users.ByID(ctx, rotated.Session.UserID)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return Tokens{}, s.revokeAfterIssueFailure(ctx, "refresh session", rotated.Session, now, ErrSessionRevoked)
+		}
+		return Tokens{}, fmt.Errorf("refresh session: load account: %w", err)
+	}
+	if account == nil || account.ID != rotated.Session.UserID {
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "refresh session", rotated.Session, now, ErrSessionRevoked)
+	}
+	if account.Status != StatusActive {
+		// Rotation already persisted a replacement token, so a concurrent disable or
+		// delete must revoke the whole family before returning a domain error.
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "refresh session", rotated.Session, now, ErrDisabled)
+	}
 
 	accessID, err := s.ids.NewID()
 	if err != nil {
-		return Tokens{}, s.revokeAfterIssueFailure(ctx, rotated.Session, now, fmt.Errorf("generate access ID: %w", err))
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "refresh session", rotated.Session, now, fmt.Errorf("generate access ID: %w", err))
 	}
 	rawAccess, accessExpiry, err := s.access.Issue(Identity{
 		UserID: rotated.Session.UserID, SessionID: rotated.Session.ID, TokenID: accessID,
 	}, now)
 	if err != nil {
-		return Tokens{}, s.revokeAfterIssueFailure(ctx, rotated.Session, now, errors.New("issue access token"))
+		return Tokens{}, s.revokeAfterIssueFailure(ctx, "refresh session", rotated.Session, now, errors.New("issue access token"))
 	}
 	return Tokens{
 		AccessToken: rawAccess, RefreshToken: rawReplacement,
@@ -259,12 +274,12 @@ func (s *AuthService) Logout(ctx context.Context, identity Identity) error {
 	return nil
 }
 
-func (s *AuthService) revokeAfterIssueFailure(ctx context.Context, session *Session, now time.Time, issueErr error) error {
+func (s *AuthService) revokeAfterIssueFailure(ctx context.Context, operation string, session *Session, now time.Time, issueErr error) error {
 	// Once a session or replacement refresh has been persisted, returning no tokens
 	// would strand an unknown live credential family. Revoke it before surfacing the
 	// failure; joining preserves a context cancellation or database category.
 	revokeErr := s.sessions.Revoke(ctx, session.ID, session.UserID, now)
-	return fmt.Errorf("create access token: %w", errors.Join(issueErr, revokeErr))
+	return fmt.Errorf("%s: create access token: %w", operation, errors.Join(issueErr, revokeErr))
 }
 
 func cloneSession(session *Session) *Session {
