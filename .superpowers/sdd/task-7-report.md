@@ -56,6 +56,89 @@ ok  	clean-arch-gin/user	0.014s
 
 - exit 0
 
+## Task 7 final review follow-up
+
+### What changed
+
+- Updated [mysqlstore/product_store_test.go](/data/workspace/open-source/golang-gin-clean-arch/mysqlstore/product_store_test.go) so each `TestProductStore` subtest creates its own `newTestDB` and `ProductStore`, preventing shared database state from hiding ordering bugs.
+- Tightened `ListStableSorting` to assert only against the three rows it seeds itself instead of expecting rows created by `CreateLookupListAndUpdate`.
+
+### Verification
+
+`timeout 300s go test -count=1 -tags=integration ./mysqlstore -run 'TestProductStore/ListStableSorting' -v`
+
+```text
+=== RUN   TestProductStore
+=== RUN   TestProductStore/ListStableSorting
+    product_store_test.go:240: List(price desc) returned 3 items, want at least 4
+--- FAIL: TestProductStore (21.26s)
+    --- FAIL: TestProductStore/ListStableSorting (0.03s)
+FAIL
+FAIL	clean-arch-gin/mysqlstore	21.354s
+FAIL
+```
+
+`timeout 300s go test -count=1 -tags=integration ./mysqlstore -run TestProductStore -v`
+
+```text
+=== RUN   TestProductStore
+=== RUN   TestProductStore/CreateLookupListAndUpdate
+=== RUN   TestProductStore/ListStableSorting
+=== RUN   TestProductStore/UpdateAndAdjustStockErrorMapping
+=== RUN   TestProductStore/ConcurrentStockAdjustment
+--- PASS: TestProductStore (76.13s)
+    --- PASS: TestProductStore/CreateLookupListAndUpdate (20.31s)
+    --- PASS: TestProductStore/ListStableSorting (20.22s)
+    --- PASS: TestProductStore/UpdateAndAdjustStockErrorMapping (17.66s)
+    --- PASS: TestProductStore/ConcurrentStockAdjustment (17.93s)
+PASS
+ok  	clean-arch-gin/mysqlstore	76.188s
+```
+
+`go test -count=1 ./...`
+
+```text
+?   	clean-arch-gin/cmd	[no test files]
+ok  	clean-arch-gin/config	0.184s
+?   	clean-arch-gin/internal/adapters/controllers	[no test files]
+?   	clean-arch-gin/internal/adapters/middleware	[no test files]
+?   	clean-arch-gin/internal/adapters/models	[no test files]
+?   	clean-arch-gin/internal/adapters/repositories	[no test files]
+?   	clean-arch-gin/internal/adapters/shared/models	[no test files]
+?   	clean-arch-gin/internal/adapters/usecases	[no test files]
+?   	clean-arch-gin/internal/adapters/user/controllers	[no test files]
+?   	clean-arch-gin/internal/adapters/user/repositories	[no test files]
+?   	clean-arch-gin/internal/adapters/user/usecases	[no test files]
+?   	clean-arch-gin/internal/application/user/commands	[no test files]
+?   	clean-arch-gin/internal/application/user/queries	[no test files]
+?   	clean-arch-gin/internal/di	[no test files]
+?   	clean-arch-gin/internal/domain/order/entities	[no test files]
+?   	clean-arch-gin/internal/domain/shared/entities	[no test files]
+?   	clean-arch-gin/internal/domain/user/entities	[no test files]
+?   	clean-arch-gin/internal/domain/user/repositories	[no test files]
+?   	clean-arch-gin/internal/domain/user/usecases	[no test files]
+?   	clean-arch-gin/internal/infrastructure/config	[no test files]
+?   	clean-arch-gin/internal/infrastructure/database	[no test files]
+?   	clean-arch-gin/internal/infrastructure/database/query	[no test files]
+?   	clean-arch-gin/internal/infrastructure/router	[no test files]
+?   	clean-arch-gin/internal/infrastructure/router/user	[no test files]
+?   	clean-arch-gin/internal/modules	[no test files]
+?   	clean-arch-gin/internal/modules/order	[no test files]
+?   	clean-arch-gin/internal/modules/user	[no test files]
+ok  	clean-arch-gin/migrations	0.006s
+ok  	clean-arch-gin/mysqlstore	0.015s
+?   	clean-arch-gin/mysqlstore/generate	[no test files]
+?   	clean-arch-gin/mysqlstore/model	[no test files]
+?   	clean-arch-gin/mysqlstore/query	[no test files]
+ok  	clean-arch-gin/product	0.008s
+ok  	clean-arch-gin/security	0.326s
+ok  	clean-arch-gin/user	0.010s
+```
+
+`go vet ./mysqlstore/...`
+
+- exit 0
+
 `timeout 300s go test -count=1 -tags=integration ./mysqlstore -run TestProductStore -v`
 
 ```text
