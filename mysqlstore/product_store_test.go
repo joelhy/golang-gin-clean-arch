@@ -136,6 +136,42 @@ func testProductStoreCreateLookupListAndUpdate(t *testing.T, store *ProductStore
 		t.Fatalf("List(admin) = %+v", adminPage)
 	}
 
+	draftPage, err := store.List(t.Context(), product.ListFilter{
+		Sort:   "created_at",
+		Limit:  10,
+		Status: product.StatusDraft,
+	}, false)
+	if err != nil {
+		t.Fatalf("List(draft filter) error = %v", err)
+	}
+	if draftPage.Total != 1 || len(draftPage.Items) != 1 || draftPage.Items[0].ID != draft.ID {
+		t.Fatalf("List(draft filter) = %+v", draftPage)
+	}
+
+	publicDraftPage, err := store.List(t.Context(), product.ListFilter{
+		Sort:   "created_at",
+		Limit:  10,
+		Status: product.StatusDraft,
+	}, true)
+	if err != nil {
+		t.Fatalf("List(public draft filter) error = %v", err)
+	}
+	if publicDraftPage.Total != 1 || len(publicDraftPage.Items) != 1 || publicDraftPage.Items[0].ID != active.ID {
+		t.Fatalf("List(public draft filter) = %+v", publicDraftPage)
+	}
+
+	publicInactivePage, err := store.List(t.Context(), product.ListFilter{
+		Sort:   "created_at",
+		Limit:  10,
+		Status: product.StatusInactive,
+	}, true)
+	if err != nil {
+		t.Fatalf("List(public inactive filter) error = %v", err)
+	}
+	if publicInactivePage.Total != 1 || len(publicInactivePage.Items) != 1 || publicInactivePage.Items[0].ID != active.ID {
+		t.Fatalf("List(public inactive filter) = %+v", publicInactivePage)
+	}
+
 	update := *gotActive
 	update.Name = "Alpha Updated"
 	update.Description = "New description"
@@ -264,6 +300,22 @@ func testProductStoreUpdateAndAdjustStockErrorMapping(t *testing.T, store *Produ
 		t.Fatalf("AdjustStock() = %+v", adjusted)
 	}
 	assertStockAdjustmentLedger(t, store.db, base.ID, actorID, -1, 1, "sale")
+
+	ledgerBeforeConflict := countStockAdjustments(t, store.db, base.ID)
+	if _, err := store.AdjustStock(t.Context(), product.AdjustmentInput{
+		ProductID: base.ID,
+		Delta:     -1,
+		Reason:    "stale-version",
+		Version:   1,
+		Actor:     product.Actor{UserID: actorID},
+		UpdatedAt: time.Date(2026, 7, 14, 3, 1, 30, 0, time.UTC),
+	}); !errors.Is(err, product.ErrConflict) {
+		t.Fatalf("stale version AdjustStock() error = %v, want ErrConflict", err)
+	}
+	ledgerAfterConflict := countStockAdjustments(t, store.db, base.ID)
+	if ledgerAfterConflict != ledgerBeforeConflict {
+		t.Fatalf("stale version AdjustStock() inserted ledger row: before=%d after=%d", ledgerBeforeConflict, ledgerAfterConflict)
+	}
 
 	if _, err := store.AdjustStock(t.Context(), product.AdjustmentInput{
 		ProductID: base.ID,
@@ -441,6 +493,18 @@ func assertStockAdjustmentLedger(t *testing.T, db *gorm.DB, productID, actorID u
 	if got.ActorUserID != actorID || got.Delta != delta || got.StockAfter != stockAfter || got.Reason != reason {
 		t.Fatalf("stock adjustment = %+v", got)
 	}
+}
+
+func countStockAdjustments(t *testing.T, db *gorm.DB, productID uint64) int64 {
+	t.Helper()
+	q := query.Use(db)
+	count, err := q.StockAdjustment.WithContext(t.Context()).
+		Where(q.StockAdjustment.ProductID.Eq(productID)).
+		Count()
+	if err != nil {
+		t.Fatalf("count stock adjustments: %v", err)
+	}
+	return count
 }
 
 func productIDs(items []product.Product) []uint64 {
