@@ -2,8 +2,10 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/mail"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -21,8 +23,17 @@ type Service struct {
 	clock     Clock
 }
 
-func NewService(store Store, passwords Passwords, clock Clock) *Service {
-	return &Service{store: store, passwords: passwords, clock: clock}
+func NewService(store Store, passwords Passwords, clock Clock) (*Service, error) {
+	if store == nil {
+		return nil, errors.New("new user service: store is required")
+	}
+	if passwords == nil {
+		return nil, errors.New("new user service: passwords is required")
+	}
+	if clock == nil {
+		return nil, errors.New("new user service: clock is required")
+	}
+	return &Service{store: store, passwords: passwords, clock: clock}, nil
 }
 
 func (s *Service) Register(ctx context.Context, input RegisterInput) (*User, error) {
@@ -67,7 +78,7 @@ func (s *Service) createWithRole(ctx context.Context, input RegisterInput, role 
 	if err := s.store.CreateWithRole(ctx, user, role); err != nil {
 		return nil, fmt.Errorf("create %s account: persist: %w", role, err)
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (s *Service) Me(ctx context.Context, userID uint64) (*User, error) {
@@ -82,7 +93,7 @@ func (s *Service) Me(ctx context.Context, userID uint64) (*User, error) {
 	if user.Status != StatusActive {
 		return nil, fmt.Errorf("get current user %d: %w", userID, ErrDisabled)
 	}
-	return user, nil
+	return cloneUser(user), nil
 }
 
 func (s *Service) UpdateMe(ctx context.Context, userID uint64, input UpdateMeInput) (*User, error) {
@@ -95,10 +106,11 @@ func (s *Service) UpdateMe(ctx context.Context, userID uint64, input UpdateMeInp
 		return nil, fmt.Errorf("update current user %d: %w", userID, err)
 	}
 	user.Name = name
-	if err := s.store.UpdateProfile(ctx, user, input.ExpectedVersion); err != nil {
+	persisted, err := s.store.UpdateProfile(ctx, user, input.ExpectedVersion)
+	if err != nil {
 		return nil, fmt.Errorf("update current user %d: %w", userID, err)
 	}
-	return user, nil
+	return cloneUser(persisted), nil
 }
 
 func normalizeEmail(value string) (string, error) {
@@ -134,4 +146,25 @@ func validatePassword(password string) error {
 		return &ValidationError{Field: "password", Message: "must be valid UTF-8 between 12 and 128 bytes", Err: ErrWeakPassword}
 	}
 	return nil
+}
+
+func cloneUser(user *User) *User {
+	if user == nil {
+		return nil
+	}
+	cloned := *user
+	cloned.Roles = slices.Clone(user.Roles)
+	for i := range cloned.Roles {
+		cloned.Roles[i].Permissions = slices.Clone(user.Roles[i].Permissions)
+	}
+	return &cloned
+}
+
+func clonePage(page Page) Page {
+	cloned := page
+	cloned.Items = slices.Clone(page.Items)
+	for i := range cloned.Items {
+		cloned.Items[i] = *cloneUser(&page.Items[i])
+	}
+	return cloned
 }

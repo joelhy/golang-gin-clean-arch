@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"unicode/utf8"
 )
 
 func (a Actor) HasPermission(permission string) bool {
@@ -36,7 +37,7 @@ func (s *Service) List(ctx context.Context, actor Actor, filter ListFilter) (Pag
 	if err != nil {
 		return Page{}, fmt.Errorf("list users: %w", err)
 	}
-	return page, nil
+	return clonePage(page), nil
 }
 
 func (s *Service) SetStatus(ctx context.Context, actor Actor, input SetStatusInput) error {
@@ -58,8 +59,9 @@ func (s *Service) SetStatus(ctx context.Context, actor Actor, input SetStatusInp
 		}
 	}
 
-	// The store repeats the last-admin check transactionally; this preflight alone
-	// cannot protect the invariant when two administrators are changed concurrently.
+	// This preflight is feedback only. The store must serialize both status and role
+	// revocations on one shared guard before its transactional recount and write;
+	// otherwise separate targets can suffer last-admin write-skew.
 	if err := s.store.SetStatus(ctx, input.UserID, input.Status, input.ExpectedVersion); err != nil {
 		return fmt.Errorf("set user %d status: %w", input.UserID, err)
 	}
@@ -91,8 +93,8 @@ func (s *Service) ReplaceRoles(ctx context.Context, actor Actor, input ReplaceRo
 		}
 	}
 
-	// The adapter must combine its invariant re-check and optimistic write in one
-	// transaction; the service call above is necessarily stale by write time.
+	// The store uses the same serialization guard and lock order as SetStatus before
+	// its transactional recount and write; this preflight is stale by write time.
 	if err := s.store.ReplaceRoles(ctx, input.UserID, roles, input.ExpectedVersion); err != nil {
 		return fmt.Errorf("replace user %d roles: %w", input.UserID, err)
 	}
@@ -104,7 +106,7 @@ func (s *Service) Permissions(ctx context.Context, userID uint64) ([]string, err
 	if err != nil {
 		return nil, fmt.Errorf("get user %d permissions: %w", userID, err)
 	}
-	return permissions, nil
+	return slices.Clone(permissions), nil
 }
 
 func requirePermission(actor Actor, permission string) error {
@@ -117,6 +119,9 @@ func requirePermission(actor Actor, permission string) error {
 func normalizeRoleNames(values []string) ([]string, error) {
 	unique := make(map[string]struct{}, len(values))
 	for _, value := range values {
+		if !utf8.ValidString(value) {
+			return nil, fmt.Errorf("role name must be valid UTF-8: %w", ErrRoleNotFound)
+		}
 		name := strings.ToLower(strings.TrimSpace(value))
 		if name == "" {
 			return nil, fmt.Errorf("role name is required: %w", ErrRoleNotFound)

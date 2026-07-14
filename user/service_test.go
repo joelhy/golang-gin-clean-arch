@@ -49,6 +49,7 @@ type fakeStore struct {
 	byEmailCalls      int
 	updateUser        *User
 	updateExpected    uint64
+	updateResult      *User
 	updateErr         error
 	updateCalls       int
 	listFilter        ListFilter
@@ -88,7 +89,7 @@ func (s *fakeStore) CreateWithRole(_ context.Context, user *User, role string) e
 	if s.createErr == nil {
 		user.ID = 42
 	}
-	s.createUser = cloneUser(user)
+	s.createUser = user
 	return s.createErr
 }
 
@@ -97,7 +98,7 @@ func (s *fakeStore) ByID(context.Context, uint64) (*User, error) {
 	if s.byIDUser == nil {
 		return nil, s.byIDErr
 	}
-	return cloneUser(s.byIDUser), s.byIDErr
+	return s.byIDUser, s.byIDErr
 }
 
 func (s *fakeStore) ByEmail(context.Context, string) (*User, error) {
@@ -105,14 +106,11 @@ func (s *fakeStore) ByEmail(context.Context, string) (*User, error) {
 	return nil, s.byIDErr
 }
 
-func (s *fakeStore) UpdateProfile(_ context.Context, user *User, expectedVersion uint64) error {
+func (s *fakeStore) UpdateProfile(_ context.Context, user *User, expectedVersion uint64) (*User, error) {
 	s.updateCalls++
-	s.updateUser = cloneUser(user)
+	s.updateUser = copyFakeUser(user)
 	s.updateExpected = expectedVersion
-	if s.updateErr == nil {
-		user.Version = expectedVersion + 1
-	}
-	return s.updateErr
+	return s.updateResult, s.updateErr
 }
 
 func (s *fakeStore) List(_ context.Context, filter ListFilter) (Page, error) {
@@ -152,16 +150,64 @@ func (s *fakeStore) IsLastActiveAdmin(_ context.Context, userID uint64) (bool, e
 func (s *fakeStore) Permissions(_ context.Context, userID uint64) ([]string, error) {
 	s.permissionsCalls++
 	s.permissionsID = userID
-	return append([]string(nil), s.permissions...), s.permissionsErr
+	return s.permissions, s.permissionsErr
 }
 
-func cloneUser(user *User) *User {
+func copyFakeUser(user *User) *User {
 	if user == nil {
 		return nil
 	}
 	cloned := *user
 	cloned.Roles = append([]Role(nil), user.Roles...)
+	for i := range cloned.Roles {
+		cloned.Roles[i].Permissions = append([]Permission(nil), user.Roles[i].Permissions...)
+	}
 	return &cloned
+}
+
+func newTestService(t *testing.T, store Store, passwords Passwords, clock Clock) *Service {
+	t.Helper()
+	service, err := NewService(store, passwords, clock)
+	if err != nil {
+		t.Fatalf("NewService() error = %v", err)
+	}
+	return service
+}
+
+func TestNewServiceRejectsNilDependencies(t *testing.T) {
+	store := newFakeStore()
+	passwords := &fakePasswords{}
+	clock := fakeClock{now: fixedTime}
+	tests := []struct {
+		name      string
+		store     Store
+		passwords Passwords
+		clock     Clock
+		wantErr   string
+	}{
+		{name: "valid", store: store, passwords: passwords, clock: clock},
+		{name: "nil store", passwords: passwords, clock: clock, wantErr: "store is required"},
+		{name: "nil passwords", store: store, clock: clock, wantErr: "passwords is required"},
+		{name: "nil clock", store: store, passwords: passwords, wantErr: "clock is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NewService(tt.store, tt.passwords, tt.clock)
+			if tt.wantErr == "" {
+				if err != nil || got == nil {
+					t.Fatalf("NewService() = (%v, %v), want non-nil service and nil error", got, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("NewService() error = %v, want substring %q", err, tt.wantErr)
+			}
+			if got != nil {
+				t.Fatalf("NewService() service = %v, want nil", got)
+			}
+		})
+	}
 }
 
 func TestNormalizeEmail(t *testing.T) {
@@ -267,7 +313,7 @@ func TestSystemClockNowUsesWallClock(t *testing.T) {
 func TestServiceRegister(t *testing.T) {
 	store := newFakeStore()
 	passwords := &fakePasswords{hashOutput: "encoded-secret"}
-	service := NewService(store, passwords, fakeClock{now: fixedTime})
+	service := newTestService(t, store, passwords, fakeClock{now: fixedTime})
 	password := "  correct horse battery staple  "
 
 	got, err := service.Register(t.Context(), RegisterInput{
@@ -309,6 +355,23 @@ func TestServiceRegister(t *testing.T) {
 	}
 }
 
+func TestServiceRegisterReturnsOwnedUser(t *testing.T) {
+	store := newFakeStore()
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
+
+	got, err := service.Register(t.Context(), validRegisterInput())
+	if err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	got.Name = "caller mutation"
+	got.Roles[0].Name = RoleAdmin
+	got.Roles[0].Permissions = append(got.Roles[0].Permissions, Permission{Name: PermissionUsersRoles})
+
+	if store.createUser.Name != "Joel" || store.createUser.Roles[0].Name != RoleCustomer || len(store.createUser.Roles[0].Permissions) != 0 {
+		t.Fatalf("caller mutation contaminated persisted input: %+v", store.createUser)
+	}
+}
+
 func TestServiceRegisterRejectsInvalidInputBeforeHashing(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -324,7 +387,7 @@ func TestServiceRegisterRejectsInvalidInputBeforeHashing(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newFakeStore()
 			passwords := &fakePasswords{}
-			service := NewService(store, passwords, fakeClock{now: fixedTime})
+			service := newTestService(t, store, passwords, fakeClock{now: fixedTime})
 
 			_, err := service.Register(t.Context(), tt.input)
 			if !errors.Is(err, tt.wantErr) {
@@ -344,7 +407,7 @@ func TestServiceRegisterPropagatesHashAndDuplicateErrors(t *testing.T) {
 	t.Run("hash", func(t *testing.T) {
 		store := newFakeStore()
 		hashErr := errors.New("hash unavailable")
-		service := NewService(store, &fakePasswords{hashErr: hashErr}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{hashErr: hashErr}, fakeClock{now: fixedTime})
 
 		_, err := service.Register(t.Context(), validRegisterInput())
 		if !errors.Is(err, hashErr) {
@@ -358,7 +421,7 @@ func TestServiceRegisterPropagatesHashAndDuplicateErrors(t *testing.T) {
 	t.Run("duplicate email", func(t *testing.T) {
 		store := newFakeStore()
 		store.createErr = fmt.Errorf("unique users email: %w", ErrEmailExists)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		_, err := service.Register(t.Context(), validRegisterInput())
 		if !errors.Is(err, ErrEmailExists) {
@@ -370,7 +433,7 @@ func TestServiceRegisterPropagatesHashAndDuplicateErrors(t *testing.T) {
 func TestServiceBootstrapAdminUsesRegistrationPath(t *testing.T) {
 	store := newFakeStore()
 	passwords := &fakePasswords{hashOutput: "admin-hash"}
-	service := NewService(store, passwords, fakeClock{now: fixedTime})
+	service := newTestService(t, store, passwords, fakeClock{now: fixedTime})
 	input := RegisterInput{Email: " ADMIN@Example.com ", Name: " Root ", Password: strings.Repeat("x", 12)}
 
 	got, err := service.BootstrapAdmin(t.Context(), input)
@@ -397,7 +460,7 @@ func TestServiceBootstrapAdminUsesRegistrationPath(t *testing.T) {
 func TestServiceMeRejectsDisabledAccount(t *testing.T) {
 	store := newFakeStore()
 	store.byIDUser = &User{ID: 7, Status: StatusDisabled}
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	_, err := service.Me(t.Context(), 7)
 	if !errors.Is(err, ErrDisabled) {
@@ -408,7 +471,7 @@ func TestServiceMeRejectsDisabledAccount(t *testing.T) {
 func TestServiceMePropagatesNotFound(t *testing.T) {
 	store := newFakeStore()
 	store.byIDErr = fmt.Errorf("select user: %w", ErrNotFound)
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	_, err := service.Me(t.Context(), 404)
 	if !errors.Is(err, ErrNotFound) {
@@ -416,13 +479,40 @@ func TestServiceMePropagatesNotFound(t *testing.T) {
 	}
 }
 
+func TestServiceMeReturnsDeepOwnedUser(t *testing.T) {
+	store := newFakeStore()
+	store.byIDUser = &User{
+		ID: 7, Name: "Joel", Status: StatusActive,
+		Roles: []Role{{Name: RoleAdmin, Permissions: []Permission{{Name: PermissionUsersWrite}}}},
+	}
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
+
+	got, err := service.Me(t.Context(), 7)
+	if err != nil {
+		t.Fatalf("Me() error = %v", err)
+	}
+	got.Name = "caller mutation"
+	got.Roles[0].Name = RoleCustomer
+	got.Roles[0].Permissions[0].Name = PermissionUsersRead
+
+	backing := store.byIDUser
+	if backing.Name != "Joel" || backing.Roles[0].Name != RoleAdmin || backing.Roles[0].Permissions[0].Name != PermissionUsersWrite {
+		t.Fatalf("caller mutation contaminated store user: %+v", backing)
+	}
+}
+
 func TestServiceUpdateMeChangesOnlyNameWithExpectedVersion(t *testing.T) {
 	store := newFakeStore()
 	store.byIDUser = &User{
 		ID: 7, Email: "joel@example.com", Name: "Before", PasswordHash: "hash",
-		Status: StatusActive, Version: 3,
+		Status: StatusActive, Version: 3, UpdatedAt: fixedTime,
 	}
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	persistedTime := fixedTime.Add(time.Minute)
+	store.updateResult = &User{
+		ID: 7, Email: "joel@example.com", Name: "After", PasswordHash: "hash",
+		Status: StatusActive, Version: 4, UpdatedAt: persistedTime,
+	}
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	got, err := service.UpdateMe(t.Context(), 7, UpdateMeInput{Name: "  After  ", ExpectedVersion: 3})
 	if err != nil {
@@ -433,13 +523,17 @@ func TestServiceUpdateMeChangesOnlyNameWithExpectedVersion(t *testing.T) {
 	}
 	wantUpdated := &User{
 		ID: 7, Email: "joel@example.com", Name: "After", PasswordHash: "hash",
-		Status: StatusActive, Version: 3,
+		Status: StatusActive, Version: 3, UpdatedAt: fixedTime,
 	}
 	if diff := cmp.Diff(wantUpdated, store.updateUser); diff != "" {
 		t.Fatalf("UpdateProfile() user mismatch (-want +got):\n%s", diff)
 	}
-	if got.Version != 4 || got.Name != "After" {
-		t.Fatalf("UpdateMe() user = %+v, want updated name and store-assigned version", got)
+	if diff := cmp.Diff(store.updateResult, got); diff != "" {
+		t.Fatalf("UpdateMe() result mismatch (-store result +got):\n%s", diff)
+	}
+	got.Name = "caller mutation"
+	if store.updateResult.Name != "After" || store.updateResult.Version != 4 || !store.updateResult.UpdatedAt.Equal(persistedTime) {
+		t.Fatalf("UpdateMe() did not return an owned persisted result: %+v", store.updateResult)
 	}
 }
 
@@ -447,7 +541,7 @@ func TestServiceUpdateMePropagatesNotFoundAndConflict(t *testing.T) {
 	t.Run("not found", func(t *testing.T) {
 		store := newFakeStore()
 		store.byIDErr = fmt.Errorf("lookup: %w", ErrNotFound)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		_, err := service.UpdateMe(t.Context(), 9, UpdateMeInput{Name: "Valid Name", ExpectedVersion: 1})
 		if !errors.Is(err, ErrNotFound) {
@@ -459,7 +553,7 @@ func TestServiceUpdateMePropagatesNotFoundAndConflict(t *testing.T) {
 		store := newFakeStore()
 		store.byIDUser = &User{ID: 7, Status: StatusActive, Version: 2}
 		store.updateErr = fmt.Errorf("optimistic update: %w", ErrConflict)
-		service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+		service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 		_, err := service.UpdateMe(t.Context(), 7, UpdateMeInput{Name: "Valid Name", ExpectedVersion: 1})
 		if !errors.Is(err, ErrConflict) {
@@ -470,7 +564,7 @@ func TestServiceUpdateMePropagatesNotFoundAndConflict(t *testing.T) {
 
 func TestServiceUpdateMeValidatesNameBeforeReading(t *testing.T) {
 	store := newFakeStore()
-	service := NewService(store, &fakePasswords{}, fakeClock{now: fixedTime})
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
 
 	_, err := service.UpdateMe(t.Context(), 7, UpdateMeInput{Name: " ", ExpectedVersion: 1})
 	if !errors.Is(err, ErrInvalidName) {
