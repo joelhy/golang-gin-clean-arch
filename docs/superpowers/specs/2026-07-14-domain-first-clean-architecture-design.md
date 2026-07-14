@@ -55,6 +55,7 @@ cmd/
 user/              用户、凭据、会话、角色和权限规则
 product/           商品目录、价格和库存规则
 order/             订单、订单项、状态机和事务用例
+reporting/         跨领域管理员统计的只读查询模型
 web/               Gin 路由、Handler、DTO、中间件和响应映射
 mysqlstore/         GORM 模型、GORM Gen 查询和端口实现
 security/           Argon2id、JWT 和安全随机 Token
@@ -66,7 +67,7 @@ migrations/         可追踪、可回滚的版本化 SQL
 
 ### 4.2 依赖规则
 
-- `user`、`product` 和 `order` 不导入 Gin、GORM、MySQL 驱动或 JWT 库。
+- `user`、`product`、`order` 和 `reporting` 不导入 Gin、GORM、MySQL 驱动或 JWT 库。
 - 领域包定义业务服务实际消费的最小端口；`mysqlstore` 和 `security` 提供具体实现。
 - `web` 只负责 HTTP 协议转换、输入校验、身份上下文、权限调用和错误映射。
 - `cmd/server` 与 `cmd/admin` 是依赖组装边界，不包含业务规则。
@@ -155,7 +156,7 @@ pending -> confirmed -> shipped -> delivered
 - `permissions`
 - `user_roles`
 - `role_permissions`
-- `sessions`
+- `sessions`、`refresh_tokens`
 - `products`
 - `stock_adjustments`
 - `orders`
