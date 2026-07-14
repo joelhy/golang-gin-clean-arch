@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -79,6 +80,47 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+func TestLoadWithRejectsProductionPlaceholderJWTKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantErr bool
+	}{
+		{name: "generic default marker", key: "default-jwt-key-that-is-long-enough-123", wantErr: true},
+		{name: "generic example marker", key: "example-jwt-key-that-is-long-enough-123", wantErr: true},
+		{name: "generic placeholder marker", key: "placeholder-jwt-key-that-is-long-enough-123", wantErr: true},
+		{name: "embedded example substring", key: "securepreexamplesuffix-key-material-0123456789abcdef"},
+		{name: "embedded default and placeholder substrings", key: "nodefaultplaceholderish-key-material-0123456789abcdef"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setConfigEnv(t, with(
+				validEnv(),
+				"APP_ENVIRONMENT", "production",
+				"APP_JWT_KEY", tt.key,
+			))
+
+			_, err := LoadWith(NewViper())
+			if tt.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "example secret") {
+					t.Fatalf("LoadWith() error = %v, want example secret rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("LoadWith() error = %v, want valid non-placeholder key", err)
+			}
+		})
+	}
+}
+
+func TestNewViperRegistersConfigKey(t *testing.T) {
+	if keys := NewViper().AllKeys(); !slices.Contains(keys, "config") {
+		t.Fatalf("NewViper().AllKeys() = %v, want config", keys)
+	}
+}
+
 func TestLoadWithPreservesBoundFlag(t *testing.T) {
 	setConfigEnv(t, validEnv())
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
@@ -127,6 +169,40 @@ jwt:
 	}
 }
 
+func TestLoadWithUsesFlagEnvironmentFilePriority(t *testing.T) {
+	setConfigEnv(t, with(validEnv(), "APP_HTTP_ADDRESS", "127.0.0.1:8082"))
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	contents := []byte(`
+http:
+  address: 127.0.0.1:8081
+`)
+	if err := os.WriteFile(path, contents, 0o600); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	flags.String("http-address", "127.0.0.1:8080", "HTTP listen address")
+	if err := flags.Parse([]string{"--http-address=127.0.0.1:8083"}); err != nil {
+		t.Fatalf("Parse() error = %v", err)
+	}
+	if !flags.Changed("http-address") {
+		t.Fatal("http-address flag was not marked changed")
+	}
+
+	v := NewViper()
+	v.SetConfigFile(path)
+	if err := v.BindPFlag("http.address", flags.Lookup("http-address")); err != nil {
+		t.Fatalf("BindPFlag() error = %v", err)
+	}
+	cfg, err := LoadWith(v)
+	if err != nil {
+		t.Fatalf("LoadWith() error = %v", err)
+	}
+	if cfg.HTTP.Address != "127.0.0.1:8083" {
+		t.Fatalf("HTTP.Address = %q, want changed flag value", cfg.HTTP.Address)
+	}
+}
+
 func TestDatabaseDSN(t *testing.T) {
 	database := Database{
 		Host:     "db.internal",
@@ -155,6 +231,7 @@ func setConfigEnv(t *testing.T, env map[string]string) {
 
 func allConfigEnvKeys() []string {
 	return []string{
+		"APP_CONFIG",
 		"APP_ENVIRONMENT",
 		"APP_HTTP_ADDRESS",
 		"APP_HTTP_READ_HEADER_TIMEOUT",

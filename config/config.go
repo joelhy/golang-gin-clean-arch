@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	mysqlconfig "github.com/go-sql-driver/mysql"
 	"github.com/spf13/viper"
@@ -25,9 +26,10 @@ type configDefault struct {
 	value any
 }
 
-// Every field has a registered key because Viper otherwise omits environment-only
-// values while walking the configuration tree during Unmarshal.
+// Every consumed key has a registered default because Viper otherwise omits
+// environment-only values while walking the configuration tree during Unmarshal.
 var configDefaults = []configDefault{
+	{key: "config", value: ""},
 	{key: "environment", value: "development"},
 	{key: "http.address", value: ":8080"},
 	{key: "http.read_header_timeout", value: 5 * time.Second},
@@ -312,9 +314,9 @@ func (j JWT) validate(environment string) error {
 	if len([]byte(j.Key)) < minimumJWTKeyBytes {
 		return fmt.Errorf("jwt key must be at least %d bytes", minimumJWTKeyBytes)
 	}
-	// Example-like keys are allowed for local experimentation but must never reach production.
-	if environment == "production" && isExampleSecret(j.Key) {
-		return fmt.Errorf("jwt key must not use an example secret in production")
+	// Placeholder keys are allowed for local experimentation but must never reach production.
+	if environment == "production" && isPlaceholderSecret(j.Key) {
+		return fmt.Errorf("jwt key must not use a placeholder or example secret in production")
 	}
 	if strings.TrimSpace(j.Issuer) == "" {
 		return fmt.Errorf("issuer is required")
@@ -334,11 +336,24 @@ func (j JWT) validate(environment string) error {
 	return nil
 }
 
-func isExampleSecret(secret string) bool {
-	normalized := strings.ToLower(secret)
-	for _, marker := range []string{"change-me", "changeme", "default-secret", "example", "your-secret"} {
-		if strings.Contains(normalized, marker) {
+func isPlaceholderSecret(secret string) bool {
+	// Delimiter-aware tokens catch documented sample credentials after common
+	// normalization while avoiding substring false positives in opaque real keys.
+	tokens := strings.FieldsFunc(strings.ToLower(secret), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	for index, token := range tokens {
+		switch token {
+		case "default", "example", "placeholder", "changeme":
 			return true
+		case "change":
+			if index+1 < len(tokens) && tokens[index+1] == "me" {
+				return true
+			}
+		case "your":
+			if index+1 < len(tokens) && (tokens[index+1] == "key" || tokens[index+1] == "secret") {
+				return true
+			}
 		}
 	}
 	return false
