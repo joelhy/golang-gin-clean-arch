@@ -11,7 +11,8 @@
   - Explicit stock adjustment flow with actor+reason+delta+version and pre-persistence insufficient-stock check.
   - SKU/name/money normalization and validation, including currency uppercasing and allowlist.
   - Clone-on-return helpers (`cloneProduct`, `clonePage`) for ownership safety.
-- Kept `product/service_test.go` unchanged (all RED tests satisfied without test rewrites).
+- Added `product/service_test.go` as the RED test contract, then satisfied it without rewriting the tests during GREEN implementation.
+- Review resolution: the plan contains both "ISO 4217 currency validation" and a narrower allowlist rule. The user chose Option B, so the documented allowlist containing `CNY`, `USD`, `EUR`, `JPY`, and `GBP` governs Task 6.
 
 ## RED evidence
 - Command: `go test -count=1 ./product -v`
@@ -45,7 +46,7 @@
 - `product/errors.go`
 - `product/types.go`
 - `product/service.go`
-- `product/service_test.go` (unchanged)
+- `product/service_test.go`
 - `.superpowers/sdd/task-6-report.md`
 
 ## Self-review and concerns
