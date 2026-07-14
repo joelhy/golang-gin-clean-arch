@@ -385,26 +385,31 @@ func (s *UserStore) IsLastActiveAdmin(ctx context.Context, userID uint64) (bool,
 	if ctx == nil {
 		return false, errors.New("inspect last active admin: context is required")
 	}
-	target, err := s.q.User.WithContext(ctx).Where(s.q.User.ID.Eq(userID)).First()
+	var last bool
+	err := query.Use(s.db.WithContext(ctx)).Transaction(func(tx *query.Query) error {
+		adminRole, target, err := lockAdminGuardAndUser(ctx, tx, userID)
+		if err != nil {
+			return fmt.Errorf("inspect last active admin: %w", err)
+		}
+		admin, err := userHasRole(ctx, tx, userID, adminRole.ID)
+		if err != nil {
+			return fmt.Errorf("inspect last active admin: roles: %w", err)
+		}
+		if target.Status != string(user.StatusActive) || !admin {
+			last = false
+			return nil
+		}
+		count, err := activeAdminCount(ctx, tx, adminRole.ID)
+		if err != nil {
+			return fmt.Errorf("inspect last active admin: count: %w", err)
+		}
+		last = count <= 1
+		return nil
+	})
 	if err != nil {
-		return false, mapUserLookupError("inspect last active admin", err)
+		return false, err
 	}
-	adminRole, err := s.q.Role.WithContext(ctx).Where(s.q.Role.Name.Eq(user.RoleAdmin)).First()
-	if err != nil {
-		return false, mapRoleLookupError("inspect last active admin", err)
-	}
-	admin, err := userHasRole(ctx, s.q, userID, adminRole.ID)
-	if err != nil {
-		return false, fmt.Errorf("inspect last active admin: roles: %w", err)
-	}
-	if target.Status != string(user.StatusActive) || !admin {
-		return false, nil
-	}
-	count, err := activeAdminCount(ctx, s.q, adminRole.ID)
-	if err != nil {
-		return false, fmt.Errorf("inspect last active admin: count: %w", err)
-	}
-	return count <= 1, nil
+	return last, nil
 }
 
 func lockAdminGuardAndUser(ctx context.Context, tx *query.Query, userID uint64) (*model.Role, *model.User, error) {

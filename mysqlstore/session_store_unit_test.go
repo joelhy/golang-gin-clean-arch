@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"clean-arch-gin/user"
+	mysqldriver "github.com/go-sql-driver/mysql"
 )
 
 func TestRefreshDigestMatchesRequiresExact32ByteDigest(t *testing.T) {
@@ -74,5 +75,47 @@ func TestSessionStoreRejectsNonCanonicalDigestWithoutLeak(t *testing.T) {
 	})
 	if !errors.Is(err, user.ErrInvalidRefresh) || strings.Contains(err.Error(), "not-hex") {
 		t.Fatalf("Rotate() error = %v, want redacted ErrInvalidRefresh", err)
+	}
+}
+
+func TestMapRefreshWriteErrorOnlyMapsRefreshDigestConstraint(t *testing.T) {
+	const sensitiveValue = "refresh-secret"
+	tests := []struct {
+		name               string
+		message            string
+		wantInvalidRefresh bool
+	}{
+		{
+			name:               "digest key",
+			message:            "Duplicate entry '" + sensitiveValue + "' for key 'uk_refresh_tokens_digest'",
+			wantInvalidRefresh: true,
+		},
+		{
+			name:               "qualified digest key",
+			message:            "Duplicate entry '" + sensitiveValue + "' for key 'refresh_tokens.uk_refresh_tokens_digest'",
+			wantInvalidRefresh: true,
+		},
+		{name: "primary key", message: "Duplicate entry '" + sensitiveValue + "' for key 'PRIMARY'"},
+		{name: "replacement key", message: "Duplicate entry '" + sensitiveValue + "' for key 'uk_refresh_tokens_replaced_by_id'"},
+		{name: "other unique key", message: "Duplicate entry '" + sensitiveValue + "' for key 'uk_refresh_tokens_session_id'"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cause := &mysqldriver.MySQLError{Number: 1062, Message: tt.message}
+			err := mapRefreshWriteError("rotate session: insert replacement", cause)
+			if got := errors.Is(err, user.ErrInvalidRefresh); got != tt.wantInvalidRefresh {
+				t.Fatalf("errors.Is(mapRefreshWriteError(), ErrInvalidRefresh) = %v, want %v; error %v", got, tt.wantInvalidRefresh, err)
+			}
+			if strings.Contains(err.Error(), sensitiveValue) {
+				t.Fatal("mapRefreshWriteError() exposed duplicate value")
+			}
+			if !tt.wantInvalidRefresh {
+				var mysqlErr *mysqldriver.MySQLError
+				if !errors.As(err, &mysqlErr) {
+					t.Fatalf("mapRefreshWriteError() = %v, want safely wrapped MySQL error", err)
+				}
+			}
+		})
 	}
 }
