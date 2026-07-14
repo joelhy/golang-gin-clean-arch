@@ -6,9 +6,19 @@
 
 **Architecture:** `user`、`product`、`order` 与 `reporting` 包拥有业务规则和消费方端口；`mysqlstore`、`security` 与 `web` 是外层适配器；`cmd/server` 和 `cmd/admin` 使用 Wire 显式组装。版本化 SQL 是数据库结构的唯一事实来源，跨库存与订单的写操作始终位于同一 MySQL 事务内。
 
-**Tech Stack:** Go 1.25.12、Gin 1.12、GORM 1.31、GORM Gen 0.3、MySQL 8.4、Wire 0.7、Cobra 1.10、Viper 1.21、golang-jwt/jwt v5、Argon2id、golang-migrate v4、Testcontainers-Go 0.43、标准库 `testing`/`httptest`/`log/slog`。
+**Tech Stack:** Go 1.25.12、Gin 1.12、GORM 1.31、GORM Gen 0.3、MySQL 8.4、Wire 0.7、Cobra 1.10、golang-jwt/jwt v5、Argon2id、golang-migrate v4、Testcontainers-Go 0.43、标准库 `os`/`testing`/`httptest`/`log/slog`。
 
 ---
+
+## User override: standard-library configuration
+
+The user explicitly removed Viper after Task 4. This section supersedes the Viper-specific parts of Tasks 1 and 13:
+
+- `config` reads `APP_*` variables through `os.LookupEnv` and strict standard-library parsers.
+- There is no implicit YAML/JSON configuration-file merge and no global configuration state.
+- An explicitly present empty environment value overrides defaults and then fails validation when the field is required.
+- Cobra remains only as the `cmd/admin` command router; it does not bind or merge application configuration. If Cobra is removed by a later user instruction, Task 13 switches to `flag.FlagSet` factories.
+- Task 4A removes Viper from source and the module graph before Task 5 starts.
 
 ## File map
 
@@ -464,6 +474,63 @@ Expected: PASS.
 ```bash
 git add security
 git commit -m "feat(security): 实现密码与令牌安全组件"
+```
+
+### Task 4A: Replace Viper with standard-library environment loading
+
+**Files:**
+- Modify: `config/config.go`
+- Modify: `config/config_test.go`
+- Modify: `go.mod`
+- Modify: `go.sum`
+
+- [ ] **Step 1: Write failing standard-library loader tests**
+
+Test a pure lookup-function loader without mutating process environment. Cover defaults, every `APP_*` override, present-but-empty required values, invalid bool/int/float/duration/list values, comma-separated CORS origins, and the existing validation matrix. Add an architecture assertion that `config` imports neither Viper nor mapstructure.
+
+```go
+func TestLoadFromEnvironment(t *testing.T) {
+	env := map[string]string{"APP_JWT_KEY": strings.Repeat("k", 32)}
+	cfg, err := loadFrom(func(key string) (string, bool) { value, ok := env[key]; return value, ok })
+	if err != nil { t.Fatal(err) }
+	if cfg.JWT.Key != env["APP_JWT_KEY"] { t.Fatalf("JWT key was not loaded") }
+}
+```
+
+- [ ] **Step 2: Verify RED**
+
+Run: `go test -count=1 ./config -v`
+
+Expected: FAIL because the Viper-based API does not provide the pure standard-library loader/import boundary.
+
+- [ ] **Step 3: Implement explicit environment decoding**
+
+`Load` calls an unexported `loadFrom(os.LookupEnv)`. Start from typed safe development defaults, then use small field-specific helpers around `strconv.Atoi`, `strconv.ParseInt`, `strconv.ParseFloat`, `strconv.ParseBool`, `time.ParseDuration`, and comma-separated string parsing. If an environment key is present, parse its exact value; never treat an empty value as absent. Call the existing `Validate` once after decoding.
+
+Remove `NewViper`, `LoadWith`, mapstructure tags and configuration-file behavior. Retain `Database.DSN`, validation, safe error categories and existing public configuration structs so database/security consumers do not change.
+
+- [ ] **Step 4: Remove Viper from the module graph**
+
+Remove the direct Viper requirement. Run `go mod tidy`, then restore the implementation plan's still-unused pinned future dependencies as explicit indirect requirements, excluding Viper. Verify `go list -deps ./...` and `go mod why -m github.com/spf13/viper` show no source dependency.
+
+- [ ] **Step 5: Verify and commit**
+
+Run:
+
+```bash
+gofmt -w config
+go test -count=1 ./config -v
+go test -race -count=1 ./config
+go vet ./config
+go test -count=1 ./...
+git diff --check
+```
+
+Commit:
+
+```bash
+git add config go.mod go.sum
+git commit -m "refactor(config): 使用标准库加载环境配置"
 ```
 
 ### Task 5: Session service and MySQL user/RBAC/session adapters
@@ -1135,7 +1202,7 @@ git commit -m "feat(api): 实现订单统计与完整路由"
 
 - [ ] **Step 1: Write failing in-memory CLI tests**
 
-Build a fresh command tree and Viper instance per test. Execute through the root with `SetArgs`. Cover help, unknown command, `migrate up`, `migrate down --steps 1 --confirm`, rejection without confirmation, `bootstrap-admin` required flags, environment binding, duplicate admin email, and output through `cmd.OutOrStdout()`.
+Build a fresh command tree per test. Execute through the root with `SetArgs`. Cover help, unknown command, `migrate up`, `migrate down --steps 1 --confirm`, rejection without confirmation, `bootstrap-admin` required flags, standard-library environment loading, duplicate admin email, and output through `cmd.OutOrStdout()`.
 
 ```go
 func TestMigrateDownRequiresConfirmation(t *testing.T) {
@@ -1156,9 +1223,9 @@ Run: `go test ./cmd/admin ./cmd/server -v`
 
 Expected: FAIL because command and server packages are absent.
 
-- [ ] **Step 4: Implement Cobra/Viper command factories**
+- [ ] **Step 4: Implement Cobra command factories**
 
-`NewRootCmd` creates a fresh `config.NewViper`, registers the optional config-file and logging flags, binds them in `PersistentPreRunE`, and loads typed configuration with `config.LoadWith`. Commands use `RunE`, `SilenceUsage`, `SilenceErrors`, command Context, and injected functions. No package globals. `migrate down` requires `--steps > 0` and `--confirm`. `bootstrap-admin` calls `user.Service.BootstrapAdmin`; password comes from a flag only when explicitly supplied, otherwise from a no-echo terminal prompt. Never print the password.
+`NewRootCmd` loads application settings once through the standard-library `config.Load`; command-specific flags remain local to the command and do not form a second configuration merge layer. Commands use `RunE`, `SilenceUsage`, `SilenceErrors`, command Context, and injected functions. No package globals. `migrate down` requires `--steps > 0` and `--confirm`. `bootstrap-admin` calls `user.Service.BootstrapAdmin`; password comes from a flag only when explicitly supplied, otherwise from a no-echo terminal prompt. Never print the password.
 
 - [ ] **Step 5: Implement server lifecycle**
 
