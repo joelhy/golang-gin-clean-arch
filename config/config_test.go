@@ -1,17 +1,253 @@
 package config
 
 import (
+	"math"
 	"os"
-	"path/filepath"
-	"slices"
+	"os/exec"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/spf13/pflag"
 )
 
-func TestLoadWith(t *testing.T) {
+func TestLoadFromUsesSafeDefaults(t *testing.T) {
+	env := map[string]string{
+		"APP_JWT_KEY": strings.Repeat("k", minimumJWTKeyBytes),
+	}
+
+	cfg, err := loadFrom(lookupMap(env))
+	if err != nil {
+		t.Fatalf("loadFrom() error = %v", err)
+	}
+
+	want := Config{
+		Environment: "development",
+		HTTP: HTTP{
+			Address:           ":8080",
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			ShutdownTimeout:   10 * time.Second,
+			MaxBodyBytes:      1 << 20,
+		},
+		DB: Database{
+			Host:            "127.0.0.1",
+			Port:            3306,
+			User:            "app",
+			Name:            "clean_arch",
+			MaxIdle:         10,
+			MaxOpen:         25,
+			ConnMaxLifetime: 30 * time.Minute,
+			ConnMaxIdleTime: 5 * time.Minute,
+		},
+		JWT: JWT{
+			Key:        env["APP_JWT_KEY"],
+			Issuer:     "clean-arch-gin",
+			Audience:   "clean-arch-api",
+			AccessTTL:  15 * time.Minute,
+			RefreshTTL: 7 * 24 * time.Hour,
+		},
+		Password: Password{
+			Memory:      64 * 1024,
+			Iterations:  3,
+			Parallelism: 2,
+			SaltLength:  16,
+			KeyLength:   32,
+		},
+		CORS: CORS{AllowedOrigins: []string{}},
+		RateLimit: RateLimit{
+			LoginRequestsPerSecond: 1,
+			LoginBurst:             5,
+		},
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatalf("loadFrom() = %#v, want %#v", cfg, want)
+	}
+}
+
+func TestLoadFromOverridesEverySupportedEnvironmentKey(t *testing.T) {
+	env := map[string]string{
+		"APP_ENVIRONMENT":                          " TEST ",
+		"APP_HTTP_ADDRESS":                         " 127.0.0.1:9090 ",
+		"APP_HTTP_READ_HEADER_TIMEOUT":             "6s",
+		"APP_HTTP_READ_TIMEOUT":                    "16s",
+		"APP_HTTP_WRITE_TIMEOUT":                   "31s",
+		"APP_HTTP_IDLE_TIMEOUT":                    "3m",
+		"APP_HTTP_SHUTDOWN_TIMEOUT":                "11s",
+		"APP_HTTP_MAX_BODY_BYTES":                  "2097152",
+		"APP_DB_HOST":                              " db.internal ",
+		"APP_DB_PORT":                              "3307",
+		"APP_DB_USER":                              " service ",
+		"APP_DB_PASSWORD":                          " db-secret ",
+		"APP_DB_NAME":                              "app_db",
+		"APP_DB_MAX_IDLE":                          "12",
+		"APP_DB_MAX_OPEN":                          "30",
+		"APP_DB_CONN_MAX_LIFETIME":                 "45m",
+		"APP_DB_CONN_MAX_IDLE_TIME":                "7m",
+		"APP_JWT_KEY":                              " jwt-key-material-0123456789abcdef ",
+		"APP_JWT_ISSUER":                           "issuer-override",
+		"APP_JWT_AUDIENCE":                         "audience-override",
+		"APP_JWT_ACCESS_TTL":                       "20m",
+		"APP_JWT_REFRESH_TTL":                      "240h",
+		"APP_JWT_LEEWAY":                           "45s",
+		"APP_PASSWORD_MEMORY":                      "131072",
+		"APP_PASSWORD_ITERATIONS":                  "4",
+		"APP_PASSWORD_PARALLELISM":                 "3",
+		"APP_PASSWORD_SALT_LENGTH":                 "24",
+		"APP_PASSWORD_KEY_LENGTH":                  "48",
+		"APP_CORS_ALLOWED_ORIGINS":                 " https://app.example.com , http://localhost:3000 ",
+		"APP_CORS_ALLOW_CREDENTIALS":               "true",
+		"APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND": "2.5",
+		"APP_RATE_LIMIT_LOGIN_BURST":               "8",
+	}
+
+	cfg, err := loadFrom(lookupMap(env))
+	if err != nil {
+		t.Fatalf("loadFrom() error = %v", err)
+	}
+
+	want := Config{
+		Environment: "test",
+		HTTP: HTTP{
+			Address:           "127.0.0.1:9090",
+			ReadHeaderTimeout: 6 * time.Second,
+			ReadTimeout:       16 * time.Second,
+			WriteTimeout:      31 * time.Second,
+			IdleTimeout:       3 * time.Minute,
+			ShutdownTimeout:   11 * time.Second,
+			MaxBodyBytes:      2097152,
+		},
+		DB: Database{
+			Host:            "db.internal",
+			Port:            3307,
+			User:            " service ",
+			Password:        " db-secret ",
+			Name:            "app_db",
+			MaxIdle:         12,
+			MaxOpen:         30,
+			ConnMaxLifetime: 45 * time.Minute,
+			ConnMaxIdleTime: 7 * time.Minute,
+		},
+		JWT: JWT{
+			Key:        " jwt-key-material-0123456789abcdef ",
+			Issuer:     "issuer-override",
+			Audience:   "audience-override",
+			AccessTTL:  20 * time.Minute,
+			RefreshTTL: 240 * time.Hour,
+			Leeway:     45 * time.Second,
+		},
+		Password: Password{
+			Memory:      131072,
+			Iterations:  4,
+			Parallelism: 3,
+			SaltLength:  24,
+			KeyLength:   48,
+		},
+		CORS: CORS{
+			AllowedOrigins:   []string{"https://app.example.com", "http://localhost:3000"},
+			AllowCredentials: true,
+		},
+		RateLimit: RateLimit{
+			LoginRequestsPerSecond: 2.5,
+			LoginBurst:             8,
+		},
+	}
+	if !reflect.DeepEqual(cfg, want) {
+		t.Fatalf("loadFrom() = %#v, want %#v", cfg, want)
+	}
+}
+
+func TestLoadFromTreatsPresentEmptyStringsAsOverrides(t *testing.T) {
+	tests := []struct {
+		name    string
+		env     map[string]string
+		wantErr string
+	}{
+		{name: "environment", env: with(validEnv(), "APP_ENVIRONMENT", ""), wantErr: "environment"},
+		{name: "HTTP address", env: with(validEnv(), "APP_HTTP_ADDRESS", ""), wantErr: "address is required"},
+		{name: "database host", env: with(validEnv(), "APP_DB_HOST", ""), wantErr: "host is required"},
+		{name: "database user", env: with(validEnv(), "APP_DB_USER", ""), wantErr: "user is required"},
+		{name: "database name", env: with(validEnv(), "APP_DB_NAME", ""), wantErr: "name is required"},
+		{name: "JWT key", env: with(validEnv(), "APP_JWT_KEY", ""), wantErr: "jwt key is required"},
+		{name: "JWT issuer", env: with(validEnv(), "APP_JWT_ISSUER", ""), wantErr: "issuer is required"},
+		{name: "JWT audience", env: with(validEnv(), "APP_JWT_AUDIENCE", ""), wantErr: "audience is required"},
+		{
+			name: "production database password",
+			env: with(validEnv(),
+				"APP_ENVIRONMENT", "production",
+				"APP_DB_PASSWORD", "",
+			),
+			wantErr: "password is required in production",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFrom(lookupMap(tt.env))
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("loadFrom() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadFromRejectsPresentEmptyTypedValues(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "integer", key: "APP_DB_MAX_OPEN"},
+		{name: "int64", key: "APP_HTTP_MAX_BODY_BYTES"},
+		{name: "boolean", key: "APP_CORS_ALLOW_CREDENTIALS"},
+		{name: "float", key: "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND"},
+		{name: "duration", key: "APP_HTTP_READ_TIMEOUT"},
+		{name: "list", key: "APP_CORS_ALLOWED_ORIGINS"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFrom(lookupMap(with(validEnv(), tt.key, "")))
+			if err == nil || !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("loadFrom() error = %v, want key %q", err, tt.key)
+			}
+		})
+	}
+}
+
+func TestLoadFromRejectsInvalidTypedValuesWithKeyContext(t *testing.T) {
+	tests := []struct {
+		name  string
+		key   string
+		value string
+	}{
+		{name: "signed integer", key: "APP_DB_MAX_OPEN", value: "many"},
+		{name: "port", key: "APP_DB_PORT", value: "3306.0"},
+		{name: "int64", key: "APP_HTTP_MAX_BODY_BYTES", value: "9223372036854775808"},
+		{name: "password int64", key: "APP_PASSWORD_MEMORY", value: "65536.0"},
+		{name: "boolean", key: "APP_CORS_ALLOW_CREDENTIALS", value: "yes"},
+		{name: "float", key: "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", value: "fast"},
+		{name: "NaN", key: "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", value: "NaN"},
+		{name: "positive infinity", key: "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", value: "+Inf"},
+		{name: "negative infinity", key: "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", value: "-Inf"},
+		{name: "duration", key: "APP_HTTP_READ_TIMEOUT", value: "eventually"},
+		{name: "leading empty list element", key: "APP_CORS_ALLOWED_ORIGINS", value: ",https://app.example.com"},
+		{name: "middle empty list element", key: "APP_CORS_ALLOWED_ORIGINS", value: "https://app.example.com,,http://localhost:3000"},
+		{name: "trailing empty list element", key: "APP_CORS_ALLOWED_ORIGINS", value: "https://app.example.com,"},
+		{name: "whitespace list element", key: "APP_CORS_ALLOWED_ORIGINS", value: "https://app.example.com,   ,http://localhost:3000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := loadFrom(lookupMap(with(validEnv(), tt.key, tt.value)))
+			if err == nil || !strings.Contains(err.Error(), tt.key) {
+				t.Fatalf("loadFrom() error = %v, want key %q", err, tt.key)
+			}
+		})
+	}
+}
+
+func TestLoadFromRunsValidation(t *testing.T) {
 	tests := []struct {
 		name    string
 		env     map[string]string
@@ -20,284 +256,223 @@ func TestLoadWith(t *testing.T) {
 		{name: "valid configuration", env: validEnv()},
 		{name: "missing JWT key", env: without(validEnv(), "APP_JWT_KEY"), wantErr: "jwt key is required"},
 		{name: "short JWT key", env: with(validEnv(), "APP_JWT_KEY", "too-short"), wantErr: "at least 32 bytes"},
-		{name: "invalid duration", env: with(validEnv(), "APP_HTTP_READ_TIMEOUT", "eventually"), wantErr: "http.read_timeout"},
 		{name: "invalid CORS URL", env: with(validEnv(), "APP_CORS_ALLOWED_ORIGINS", "ftp://api.example.com"), wantErr: "absolute http/https URL"},
 		{name: "invalid database pool bounds", env: with(validEnv(), "APP_DB_MAX_IDLE", "11", "APP_DB_MAX_OPEN", "10"), wantErr: "max idle"},
 		{
 			name: "production example secret",
-			env: with(
-				validEnv(),
+			env: with(validEnv(),
 				"APP_ENVIRONMENT", "production",
 				"APP_JWT_KEY", "change-me-in-production-1234567890",
 			),
 			wantErr: "example secret",
 		},
-		{
-			name: "production example-labelled secret",
-			env: with(
-				validEnv(),
-				"APP_ENVIRONMENT", "production",
-				"APP_JWT_KEY", "example-jwt-key-0123456789abcdef0123456789",
-			),
-			wantErr: "example secret",
-		},
-		{
-			name:    "non-finite rate limit",
-			env:     with(validEnv(), "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", "NaN"),
-			wantErr: "login requests per second must be positive and finite",
-		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setConfigEnv(t, tt.env)
-
-			cfg, err := LoadWith(NewViper())
-			if tt.wantErr != "" {
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
+			_, err := loadFrom(lookupMap(tt.env))
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("loadFrom() error = %v", err)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("LoadWith() error = %v", err)
-			}
-			if cfg.HTTP.ReadTimeout != 11*time.Second {
-				t.Errorf("HTTP.ReadTimeout = %v, want 11s", cfg.HTTP.ReadTimeout)
-			}
-			if len(cfg.CORS.AllowedOrigins) != 2 {
-				t.Errorf("CORS.AllowedOrigins = %v, want two origins", cfg.CORS.AllowedOrigins)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("loadFrom() error = %v, want substring %q", err, tt.wantErr)
 			}
 		})
 	}
 }
 
-func TestLoad(t *testing.T) {
+func TestLoadReadsProcessEnvironment(t *testing.T) {
 	setConfigEnv(t, validEnv())
 
-	if _, err := Load(); err != nil {
+	cfg, err := Load()
+	if err != nil {
 		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.HTTP.ReadTimeout != 11*time.Second {
+		t.Fatalf("HTTP.ReadTimeout = %v, want 11s", cfg.HTTP.ReadTimeout)
 	}
 }
 
-func TestLoadWithRejectsProductionPlaceholderJWTKeys(t *testing.T) {
+func TestConfigValidate(t *testing.T) {
 	tests := []struct {
 		name    string
-		key     string
-		wantErr bool
+		mutate  func(*Config)
+		wantErr string
 	}{
-		{name: "generic default marker", key: "default-jwt-key-that-is-long-enough-123", wantErr: true},
-		{name: "generic example marker", key: "example-jwt-key-that-is-long-enough-123", wantErr: true},
-		{name: "generic placeholder marker", key: "placeholder-jwt-key-that-is-long-enough-123", wantErr: true},
+		{name: "valid", mutate: func(*Config) {}},
+		{name: "environment", mutate: func(c *Config) { c.Environment = "staging" }, wantErr: "environment"},
+		{name: "HTTP address required", mutate: func(c *Config) { c.HTTP.Address = " " }, wantErr: "address is required"},
+		{name: "HTTP address missing port", mutate: func(c *Config) { c.HTTP.Address = "localhost" }, wantErr: "valid host and port"},
+		{name: "HTTP address port", mutate: func(c *Config) { c.HTTP.Address = ":0" }, wantErr: "invalid port"},
+		{name: "HTTP read header timeout", mutate: func(c *Config) { c.HTTP.ReadHeaderTimeout = 0 }, wantErr: "read header timeout"},
+		{name: "HTTP read timeout", mutate: func(c *Config) { c.HTTP.ReadTimeout = 0 }, wantErr: "read timeout"},
+		{name: "HTTP write timeout", mutate: func(c *Config) { c.HTTP.WriteTimeout = 0 }, wantErr: "write timeout"},
+		{name: "HTTP idle timeout", mutate: func(c *Config) { c.HTTP.IdleTimeout = 0 }, wantErr: "idle timeout"},
+		{name: "HTTP shutdown timeout", mutate: func(c *Config) { c.HTTP.ShutdownTimeout = 0 }, wantErr: "shutdown timeout"},
+		{name: "HTTP body limit", mutate: func(c *Config) { c.HTTP.MaxBodyBytes = 0 }, wantErr: "max body bytes"},
+		{name: "database host", mutate: func(c *Config) { c.DB.Host = " " }, wantErr: "host is required"},
+		{name: "database port", mutate: func(c *Config) { c.DB.Port = 65536 }, wantErr: "port must be between"},
+		{name: "database user", mutate: func(c *Config) { c.DB.User = " " }, wantErr: "user is required"},
+		{name: "database name", mutate: func(c *Config) { c.DB.Name = " " }, wantErr: "name is required"},
+		{name: "database max open", mutate: func(c *Config) { c.DB.MaxOpen = 0 }, wantErr: "max open"},
+		{name: "database negative max idle", mutate: func(c *Config) { c.DB.MaxIdle = -1 }, wantErr: "max idle cannot be negative"},
+		{name: "database max idle exceeds max open", mutate: func(c *Config) { c.DB.MaxIdle = c.DB.MaxOpen + 1 }, wantErr: "max idle cannot exceed"},
+		{name: "database connection max lifetime", mutate: func(c *Config) { c.DB.ConnMaxLifetime = 0 }, wantErr: "connection max lifetime"},
+		{name: "database connection max idle time", mutate: func(c *Config) { c.DB.ConnMaxIdleTime = 0 }, wantErr: "connection max idle time"},
+		{
+			name: "production database password",
+			mutate: func(c *Config) {
+				c.Environment = "production"
+				c.DB.Password = " "
+			},
+			wantErr: "password is required in production",
+		},
+		{name: "JWT key required", mutate: func(c *Config) { c.JWT.Key = "" }, wantErr: "jwt key is required"},
+		{name: "JWT key length", mutate: func(c *Config) { c.JWT.Key = "short" }, wantErr: "at least 32 bytes"},
+		{
+			name: "JWT placeholder",
+			mutate: func(c *Config) {
+				c.Environment = "production"
+				c.JWT.Key = "placeholder-jwt-key-that-is-long-enough-123"
+			},
+			wantErr: "example secret",
+		},
+		{name: "JWT issuer", mutate: func(c *Config) { c.JWT.Issuer = " " }, wantErr: "issuer is required"},
+		{name: "JWT audience", mutate: func(c *Config) { c.JWT.Audience = " " }, wantErr: "audience is required"},
+		{name: "JWT access TTL", mutate: func(c *Config) { c.JWT.AccessTTL = 0 }, wantErr: "access TTL"},
+		{name: "JWT refresh TTL", mutate: func(c *Config) { c.JWT.RefreshTTL = 0 }, wantErr: "refresh TTL must be positive"},
+		{name: "JWT refresh not greater", mutate: func(c *Config) { c.JWT.RefreshTTL = c.JWT.AccessTTL }, wantErr: "refresh TTL must exceed"},
+		{name: "JWT negative leeway", mutate: func(c *Config) { c.JWT.Leeway = -time.Nanosecond }, wantErr: "leeway"},
+		{name: "JWT excessive leeway", mutate: func(c *Config) { c.JWT.Leeway = 5*time.Minute + time.Nanosecond }, wantErr: "leeway"},
+		{name: "JWT leeway exceeds access TTL", mutate: func(c *Config) { c.JWT.AccessTTL = time.Second; c.JWT.Leeway = time.Second + time.Nanosecond }, wantErr: "leeway"},
+		{name: "password memory low", mutate: func(c *Config) { c.Password.Memory = minimumArgonMemory - 1 }, wantErr: "memory"},
+		{name: "password memory high", mutate: func(c *Config) { c.Password.Memory = maximumArgonMemory + 1 }, wantErr: "memory"},
+		{name: "password iterations low", mutate: func(c *Config) { c.Password.Iterations = 0 }, wantErr: "iterations"},
+		{name: "password iterations high", mutate: func(c *Config) { c.Password.Iterations = 11 }, wantErr: "iterations"},
+		{name: "password parallelism low", mutate: func(c *Config) { c.Password.Parallelism = 0 }, wantErr: "parallelism"},
+		{name: "password parallelism high", mutate: func(c *Config) { c.Password.Parallelism = 33 }, wantErr: "parallelism"},
+		{name: "password salt length low", mutate: func(c *Config) { c.Password.SaltLength = 15 }, wantErr: "salt length"},
+		{name: "password salt length high", mutate: func(c *Config) { c.Password.SaltLength = 65 }, wantErr: "salt length"},
+		{name: "password key length low", mutate: func(c *Config) { c.Password.KeyLength = 15 }, wantErr: "key length"},
+		{name: "password key length high", mutate: func(c *Config) { c.Password.KeyLength = 65 }, wantErr: "key length"},
+		{name: "CORS relative origin", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"app.example.com"} }, wantErr: "absolute http/https URL"},
+		{name: "CORS scheme", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"ftp://app.example.com"} }, wantErr: "absolute http/https URL"},
+		{name: "CORS credentials", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://user@app.example.com"} }, wantErr: "without credentials"},
+		{name: "CORS path", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com/path"} }, wantErr: "must not contain a path"},
+		{name: "CORS query", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com?x=1"} }, wantErr: "must not contain a path"},
+		{name: "CORS fragment", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com#x"} }, wantErr: "must not contain a path"},
+		{name: "CORS hostname", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://:443"} }, wantErr: "hostname"},
+		{name: "CORS zero port", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com:0"} }, wantErr: "port"},
+		{name: "CORS high port", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com:65536"} }, wantErr: "port"},
+		{name: "CORS malformed port", mutate: func(c *Config) { c.CORS.AllowedOrigins = []string{"https://app.example.com:http"} }, wantErr: "absolute http/https URL"},
+		{name: "CORS duplicate", mutate: func(c *Config) {
+			c.CORS.AllowedOrigins = []string{"https://app.example.com", "https://app.example.com"}
+		}, wantErr: "duplicated"},
+		{name: "rate limit zero", mutate: func(c *Config) { c.RateLimit.LoginRequestsPerSecond = 0 }, wantErr: "positive and finite"},
+		{name: "rate limit NaN", mutate: func(c *Config) { c.RateLimit.LoginRequestsPerSecond = math.NaN() }, wantErr: "positive and finite"},
+		{name: "rate limit infinity", mutate: func(c *Config) { c.RateLimit.LoginRequestsPerSecond = math.Inf(1) }, wantErr: "positive and finite"},
+		{name: "rate limit burst", mutate: func(c *Config) { c.RateLimit.LoginBurst = 0 }, wantErr: "login burst"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfigForTest()
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestPasswordValidationAcceptsInclusiveBounds(t *testing.T) {
+	tests := []Password{
+		{Memory: minimumArgonMemory, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 16},
+		{Memory: maximumArgonMemory, Iterations: 10, Parallelism: 32, SaltLength: 64, KeyLength: 64},
+	}
+	for _, password := range tests {
+		if err := password.validate(); err != nil {
+			t.Errorf("Password.validate() error = %v for %#v", err, password)
+		}
+	}
+}
+
+func TestCORSValidationAcceptsTCPPortBounds(t *testing.T) {
+	cors := CORS{AllowedOrigins: []string{"https://app.example.com:1", "https://api.example.com:65535"}}
+	if err := cors.validate(); err != nil {
+		t.Fatalf("CORS.validate() error = %v", err)
+	}
+}
+
+func TestPlaceholderSecretDetection(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         string
+		placeholder bool
+	}{
+		{name: "default marker", key: "default-jwt-key-that-is-long-enough-123", placeholder: true},
+		{name: "example marker", key: "example-jwt-key-that-is-long-enough-123", placeholder: true},
+		{name: "placeholder marker", key: "placeholder-jwt-key-that-is-long-enough-123", placeholder: true},
+		{name: "change me marker", key: "change-me-in-production-1234567890", placeholder: true},
+		{name: "change me compact marker", key: "changeme-jwt-key-that-is-long-enough-123", placeholder: true},
+		{name: "your key marker", key: "your-key-must-be-replaced-0123456789", placeholder: true},
+		{name: "your secret marker", key: "your-secret-must-be-replaced-012345", placeholder: true},
 		{name: "embedded example substring", key: "securepreexamplesuffix-key-material-0123456789abcdef"},
 		{name: "embedded default and placeholder substrings", key: "nodefaultplaceholderish-key-material-0123456789abcdef"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setConfigEnv(t, with(
-				validEnv(),
-				"APP_ENVIRONMENT", "production",
-				"APP_JWT_KEY", tt.key,
-			))
-
-			_, err := LoadWith(NewViper())
-			if tt.wantErr {
-				if err == nil || !strings.Contains(err.Error(), "example secret") {
-					t.Fatalf("LoadWith() error = %v, want example secret rejection", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("LoadWith() error = %v, want valid non-placeholder key", err)
+			if got := isPlaceholderSecret(tt.key); got != tt.placeholder {
+				t.Fatalf("isPlaceholderSecret() = %t, want %t", got, tt.placeholder)
 			}
 		})
 	}
 }
 
-func TestNewViperRegistersConfigKey(t *testing.T) {
-	if keys := NewViper().AllKeys(); !slices.Contains(keys, "config") {
-		t.Fatalf("NewViper().AllKeys() = %v, want config", keys)
-	}
-}
-
-func TestLoadWithPreservesBoundFlag(t *testing.T) {
-	setConfigEnv(t, validEnv())
-	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	flags.String("http-address", "", "HTTP listen address")
-	if err := flags.Parse([]string{"--http-address=127.0.0.1:9090"}); err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-
-	v := NewViper()
-	if err := v.BindPFlag("http.address", flags.Lookup("http-address")); err != nil {
-		t.Fatalf("BindPFlag() error = %v", err)
-	}
-	cfg, err := LoadWith(v)
-	if err != nil {
-		t.Fatalf("LoadWith() error = %v", err)
-	}
-	if cfg.HTTP.Address != "127.0.0.1:9090" {
-		t.Fatalf("HTTP.Address = %q, want flag value", cfg.HTTP.Address)
-	}
-}
-
-func TestLoadWithReadsConfiguredFile(t *testing.T) {
-	setConfigEnv(t, map[string]string{})
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	contents := []byte(`
-environment: test
-http:
-  address: 127.0.0.1:9091
-jwt:
-  key: 0123456789abcdef0123456789abcdef
-  issuer: file-issuer
-  audience: file-audience
-`)
-	if err := os.WriteFile(path, contents, 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	v := NewViper()
-	v.SetConfigFile(path)
-	cfg, err := LoadWith(v)
-	if err != nil {
-		t.Fatalf("LoadWith() error = %v", err)
-	}
-	if cfg.HTTP.Address != "127.0.0.1:9091" {
-		t.Fatalf("HTTP.Address = %q, want config file value", cfg.HTTP.Address)
-	}
-}
-
-func TestLoadWithRejectsInvalidArgon2Numbers(t *testing.T) {
+func TestLoadFromErrorsDoNotExposeSecrets(t *testing.T) {
 	tests := []struct {
-		name    string
-		field   string
-		value   string
-		wantErr string
+		name   string
+		secret string
+		env    func(string) map[string]string
 	}{
-		{name: "negative memory", field: "memory", value: "-4294901760", wantErr: "memory"},
-		{name: "overflow memory", field: "memory", value: "4295032832", wantErr: "memory"},
-		{name: "negative iterations", field: "iterations", value: "-4294967293", wantErr: "iterations"},
-		{name: "overflow iterations", field: "iterations", value: "4294967299", wantErr: "iterations"},
-		{name: "negative parallelism", field: "parallelism", value: "-254", wantErr: "parallelism"},
-		{name: "overflow parallelism", field: "parallelism", value: "258", wantErr: "parallelism"},
-		{name: "negative salt length", field: "salt_length", value: "-4294967280", wantErr: "salt length"},
-		{name: "overflow salt length", field: "salt_length", value: "4294967312", wantErr: "salt length"},
-		{name: "negative key length", field: "key_length", value: "-4294967264", wantErr: "key length"},
-		{name: "overflow key length", field: "key_length", value: "4294967328", wantErr: "key length"},
+		{
+			name:   "short JWT key",
+			secret: "private-short-key",
+			env: func(secret string) map[string]string {
+				return with(validEnv(), "APP_JWT_KEY", secret)
+			},
+		},
+		{
+			name:   "production placeholder JWT key",
+			secret: "placeholder-private-key-material-0123456789",
+			env: func(secret string) map[string]string {
+				return with(validEnv(), "APP_ENVIRONMENT", "production", "APP_JWT_KEY", secret)
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setConfigEnv(t, map[string]string{})
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			contents := []byte("jwt:\n  key: 0123456789abcdef0123456789abcdef\npassword:\n  " + tt.field + ": " + tt.value + "\n")
-			if err := os.WriteFile(path, contents, 0o600); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
+			_, err := loadFrom(lookupMap(tt.env(tt.secret)))
+			if err == nil {
+				t.Fatal("loadFrom() error = nil, want validation error")
 			}
-
-			v := NewViper()
-			v.SetConfigFile(path)
-			_, err := LoadWith(v)
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
+			if strings.Contains(err.Error(), tt.secret) {
+				t.Fatalf("loadFrom() error exposes secret: %v", err)
 			}
 		})
-	}
-}
-
-func TestLoadWithEmptyEnvironmentOverridesConfigFile(t *testing.T) {
-	tests := []struct {
-		name    string
-		key     string
-		wantErr string
-	}{
-		{name: "empty HTTP address", key: "APP_HTTP_ADDRESS", wantErr: "address is required"},
-		{name: "empty JWT key", key: "APP_JWT_KEY", wantErr: "jwt key is required"},
-		{name: "empty JWT issuer", key: "APP_JWT_ISSUER", wantErr: "issuer is required"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setConfigEnv(t, with(validEnv(), tt.key, ""))
-			path := filepath.Join(t.TempDir(), "config.yaml")
-			contents := []byte(`
-http:
-  address: 127.0.0.1:8090
-jwt:
-  key: abcdef0123456789abcdef0123456789
-  issuer: file-issuer
-`)
-			if err := os.WriteFile(path, contents, 0o600); err != nil {
-				t.Fatalf("WriteFile() error = %v", err)
-			}
-
-			v := NewViper()
-			v.SetConfigFile(path)
-			_, err := LoadWith(v)
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestLoadWithRejectsInvalidCORSOrigins(t *testing.T) {
-	tests := []struct {
-		name    string
-		origin  string
-		wantErr string
-	}{
-		{name: "missing hostname", origin: "https://:443", wantErr: "hostname"},
-		{name: "zero port", origin: "https://example.com:0", wantErr: "port"},
-		{name: "out of range port", origin: "https://example.com:65536", wantErr: "port"},
-		{name: "non-numeric port", origin: "https://example.com:http", wantErr: "absolute http/https URL"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			setConfigEnv(t, with(validEnv(), "APP_CORS_ALLOWED_ORIGINS", tt.origin))
-
-			_, err := LoadWith(NewViper())
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("LoadWith() error = %v, want substring %q", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestLoadWithUsesFlagEnvironmentFilePriority(t *testing.T) {
-	setConfigEnv(t, with(validEnv(), "APP_HTTP_ADDRESS", "127.0.0.1:8082"))
-	path := filepath.Join(t.TempDir(), "config.yaml")
-	contents := []byte(`
-http:
-  address: 127.0.0.1:8081
-`)
-	if err := os.WriteFile(path, contents, 0o600); err != nil {
-		t.Fatalf("WriteFile() error = %v", err)
-	}
-
-	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	flags.String("http-address", "127.0.0.1:8080", "HTTP listen address")
-	if err := flags.Parse([]string{"--http-address=127.0.0.1:8083"}); err != nil {
-		t.Fatalf("Parse() error = %v", err)
-	}
-	if !flags.Changed("http-address") {
-		t.Fatal("http-address flag was not marked changed")
-	}
-
-	v := NewViper()
-	v.SetConfigFile(path)
-	if err := v.BindPFlag("http.address", flags.Lookup("http-address")); err != nil {
-		t.Fatalf("BindPFlag() error = %v", err)
-	}
-	cfg, err := LoadWith(v)
-	if err != nil {
-		t.Fatalf("LoadWith() error = %v", err)
-	}
-	if cfg.HTTP.Address != "127.0.0.1:8083" {
-		t.Fatalf("HTTP.Address = %q, want changed flag value", cfg.HTTP.Address)
 	}
 }
 
@@ -314,6 +489,49 @@ func TestDatabaseDSN(t *testing.T) {
 		if got := database.DSN(); !strings.Contains(got, want) {
 			t.Errorf("Database.DSN() = %q, want substring %q", got, want)
 		}
+	}
+}
+
+func TestCurrentSourceHasNoRemovedConfigurationOrCLIFramework(t *testing.T) {
+	source, err := os.ReadFile("config.go")
+	if err != nil {
+		t.Fatalf("ReadFile(config.go) error = %v", err)
+	}
+	module, err := os.ReadFile("../go.mod")
+	if err != nil {
+		t.Fatalf("ReadFile(../go.mod) error = %v", err)
+	}
+	command := exec.Command("go", "list", "-deps", "./...")
+	command.Dir = ".."
+	dependencies, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("go list -deps ./... error = %v\n%s", err, dependencies)
+	}
+
+	for _, forbidden := range []string{"github.com/spf13/viper", "github.com/spf13/cobra", "mapstructure"} {
+		if strings.Contains(string(source), forbidden) {
+			t.Errorf("config.go contains forbidden dependency %q", forbidden)
+		}
+		if strings.Contains(string(module), forbidden) {
+			t.Errorf("go.mod contains forbidden dependency %q", forbidden)
+		}
+		if strings.Contains(string(dependencies), forbidden) {
+			t.Errorf("config dependency graph contains forbidden dependency %q", forbidden)
+		}
+	}
+}
+
+func validConfigForTest() Config {
+	cfg := defaultConfig()
+	cfg.JWT.Key = strings.Repeat("k", minimumJWTKeyBytes)
+	cfg.DB.Password = "database-secret"
+	return cfg
+}
+
+func lookupMap(env map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		value, ok := env[key]
+		return value, ok
 	}
 }
 
@@ -356,7 +574,6 @@ func setConfigEnv(t *testing.T, env map[string]string) {
 
 func allConfigEnvKeys() []string {
 	return []string{
-		"APP_CONFIG",
 		"APP_ENVIRONMENT",
 		"APP_HTTP_ADDRESS",
 		"APP_HTTP_READ_HEADER_TIMEOUT",
@@ -379,6 +596,7 @@ func allConfigEnvKeys() []string {
 		"APP_JWT_AUDIENCE",
 		"APP_JWT_ACCESS_TTL",
 		"APP_JWT_REFRESH_TTL",
+		"APP_JWT_LEEWAY",
 		"APP_PASSWORD_MEMORY",
 		"APP_PASSWORD_ITERATIONS",
 		"APP_PASSWORD_PARALLELISM",
@@ -415,6 +633,7 @@ func validEnv() map[string]string {
 		"APP_JWT_AUDIENCE":                         "clean-arch-api",
 		"APP_JWT_ACCESS_TTL":                       "15m",
 		"APP_JWT_REFRESH_TTL":                      "168h",
+		"APP_JWT_LEEWAY":                           "30s",
 		"APP_PASSWORD_MEMORY":                      "65536",
 		"APP_PASSWORD_ITERATIONS":                  "3",
 		"APP_PASSWORD_PARALLELISM":                 "2",

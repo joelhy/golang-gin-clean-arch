@@ -6,166 +6,233 @@ import (
 	"math"
 	"net"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	mysqlconfig "github.com/go-sql-driver/mysql"
-	"github.com/spf13/viper"
 )
 
 const (
 	minimumJWTKeyBytes = 32
+	maximumJWTLeeway   = 5 * time.Minute
 	minimumArgonMemory = 19 * 1024
 	maximumArgonMemory = 1024 * 1024
 )
 
-type configDefault struct {
-	key   string
-	value any
-}
-
-// Every consumed key has a registered default because Viper otherwise omits
-// environment-only values while walking the configuration tree during Unmarshal.
-var configDefaults = []configDefault{
-	{key: "config", value: ""},
-	{key: "environment", value: "development"},
-	{key: "http.address", value: ":8080"},
-	{key: "http.read_header_timeout", value: 5 * time.Second},
-	{key: "http.read_timeout", value: 15 * time.Second},
-	{key: "http.write_timeout", value: 30 * time.Second},
-	{key: "http.idle_timeout", value: 2 * time.Minute},
-	{key: "http.shutdown_timeout", value: 10 * time.Second},
-	{key: "http.max_body_bytes", value: int64(1 << 20)},
-	{key: "db.host", value: "127.0.0.1"},
-	{key: "db.port", value: 3306},
-	{key: "db.user", value: "app"},
-	// An empty database password is safe as a development default and is rejected in production.
-	{key: "db.password", value: ""},
-	{key: "db.name", value: "clean_arch"},
-	{key: "db.max_idle", value: 10},
-	{key: "db.max_open", value: 25},
-	{key: "db.conn_max_lifetime", value: 30 * time.Minute},
-	{key: "db.conn_max_idle_time", value: 5 * time.Minute},
-	// JWT keys intentionally have no usable default so startup cannot silently use a shared secret.
-	{key: "jwt.key", value: ""},
-	{key: "jwt.issuer", value: "clean-arch-gin"},
-	{key: "jwt.audience", value: "clean-arch-api"},
-	{key: "jwt.access_ttl", value: 15 * time.Minute},
-	{key: "jwt.refresh_ttl", value: 7 * 24 * time.Hour},
-	{key: "password.memory", value: int64(64 * 1024)},
-	{key: "password.iterations", value: int64(3)},
-	{key: "password.parallelism", value: int64(2)},
-	{key: "password.salt_length", value: int64(16)},
-	{key: "password.key_length", value: int64(32)},
-	{key: "cors.allowed_origins", value: []string{}},
-	{key: "cors.allow_credentials", value: false},
-	{key: "rate_limit.login_requests_per_second", value: 1.0},
-	{key: "rate_limit.login_burst", value: 5},
-}
-
 // Config is the validated application configuration passed to runtime components.
 type Config struct {
-	Environment string    `mapstructure:"environment"`
-	HTTP        HTTP      `mapstructure:"http"`
-	DB          Database  `mapstructure:"db"`
-	JWT         JWT       `mapstructure:"jwt"`
-	Password    Password  `mapstructure:"password"`
-	CORS        CORS      `mapstructure:"cors"`
-	RateLimit   RateLimit `mapstructure:"rate_limit"`
+	Environment string
+	HTTP        HTTP
+	DB          Database
+	JWT         JWT
+	Password    Password
+	CORS        CORS
+	RateLimit   RateLimit
 }
 
 // HTTP contains server limits and lifecycle timeouts.
 type HTTP struct {
-	Address           string        `mapstructure:"address"`
-	ReadHeaderTimeout time.Duration `mapstructure:"read_header_timeout"`
-	ReadTimeout       time.Duration `mapstructure:"read_timeout"`
-	WriteTimeout      time.Duration `mapstructure:"write_timeout"`
-	IdleTimeout       time.Duration `mapstructure:"idle_timeout"`
-	ShutdownTimeout   time.Duration `mapstructure:"shutdown_timeout"`
-	MaxBodyBytes      int64         `mapstructure:"max_body_bytes"`
+	Address           string
+	ReadHeaderTimeout time.Duration
+	ReadTimeout       time.Duration
+	WriteTimeout      time.Duration
+	IdleTimeout       time.Duration
+	ShutdownTimeout   time.Duration
+	MaxBodyBytes      int64
 }
 
 // Database contains MySQL connection and database/sql pool settings.
 type Database struct {
-	Host            string        `mapstructure:"host"`
-	Port            int           `mapstructure:"port"`
-	User            string        `mapstructure:"user"`
-	Password        string        `mapstructure:"password"`
-	Name            string        `mapstructure:"name"`
-	MaxIdle         int           `mapstructure:"max_idle"`
-	MaxOpen         int           `mapstructure:"max_open"`
-	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
-	ConnMaxIdleTime time.Duration `mapstructure:"conn_max_idle_time"`
+	Host            string
+	Port            int
+	User            string
+	Password        string
+	Name            string
+	MaxIdle         int
+	MaxOpen         int
+	ConnMaxLifetime time.Duration
+	ConnMaxIdleTime time.Duration
 }
 
 // JWT contains token signing identity and expiry settings.
 type JWT struct {
-	Key        string        `mapstructure:"key"`
-	Issuer     string        `mapstructure:"issuer"`
-	Audience   string        `mapstructure:"audience"`
-	AccessTTL  time.Duration `mapstructure:"access_ttl"`
-	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
+	Key        string
+	Issuer     string
+	Audience   string
+	AccessTTL  time.Duration
+	RefreshTTL time.Duration
+	Leeway     time.Duration
 }
 
 // Password contains bounded Argon2id work and output parameters. Signed wide
 // fields keep weak decoding from wrapping hostile negative or oversized input.
 type Password struct {
-	Memory      int64 `mapstructure:"memory"`
-	Iterations  int64 `mapstructure:"iterations"`
-	Parallelism int64 `mapstructure:"parallelism"`
-	SaltLength  int64 `mapstructure:"salt_length"`
-	KeyLength   int64 `mapstructure:"key_length"`
+	Memory      int64
+	Iterations  int64
+	Parallelism int64
+	SaltLength  int64
+	KeyLength   int64
 }
 
 // CORS contains the browser origins explicitly allowed to call the API.
 type CORS struct {
-	AllowedOrigins   []string `mapstructure:"allowed_origins"`
-	AllowCredentials bool     `mapstructure:"allow_credentials"`
+	AllowedOrigins   []string
+	AllowCredentials bool
 }
 
 // RateLimit contains login throttling parameters consumed by the HTTP middleware.
 type RateLimit struct {
-	LoginRequestsPerSecond float64 `mapstructure:"login_requests_per_second"`
-	LoginBurst             int     `mapstructure:"login_burst"`
+	LoginRequestsPerSecond float64
+	LoginBurst             int
 }
 
-// NewViper returns an isolated Viper instance suitable for one command tree or load.
-func NewViper() *viper.Viper {
-	v := viper.New()
-	configureViper(v)
-	return v
+// defaultConfig returns an isolated, typed configuration suitable for one application load.
+// Every consumed key has a typed default so absence is explicit and independent of process state.
+func defaultConfig() Config {
+	return Config{
+		Environment: "development",
+		HTTP: HTTP{
+			Address:           ":8080",
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       15 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       2 * time.Minute,
+			ShutdownTimeout:   10 * time.Second,
+			MaxBodyBytes:      1 << 20,
+		},
+		DB: Database{
+			Host: "127.0.0.1",
+			Port: 3306,
+			User: "app",
+			// An empty database password is safe as a development default and is rejected in production.
+			Password:        "",
+			Name:            "clean_arch",
+			MaxIdle:         10,
+			MaxOpen:         25,
+			ConnMaxLifetime: 30 * time.Minute,
+			ConnMaxIdleTime: 5 * time.Minute,
+		},
+		JWT: JWT{
+			// JWT keys intentionally have no usable default so startup cannot silently use a shared secret.
+			Key:        "",
+			Issuer:     "clean-arch-gin",
+			Audience:   "clean-arch-api",
+			AccessTTL:  15 * time.Minute,
+			RefreshTTL: 7 * 24 * time.Hour,
+			Leeway:     0,
+		},
+		Password: Password{
+			Memory:      64 * 1024,
+			Iterations:  3,
+			Parallelism: 2,
+			SaltLength:  16,
+			KeyLength:   32,
+		},
+		CORS: CORS{
+			AllowedOrigins:   []string{},
+			AllowCredentials: false,
+		},
+		RateLimit: RateLimit{
+			LoginRequestsPerSecond: 1,
+			LoginBurst:             5,
+		},
+	}
 }
 
-// Load creates an isolated Viper instance, loads its sources, and validates the result.
+// Load reads the current process environment through the standard library and validates it.
 func Load() (Config, error) {
-	return LoadWith(NewViper())
+	return loadFrom(os.LookupEnv)
 }
 
-// LoadWith loads configuration without replacing any values or flag bindings already on v.
-func LoadWith(v *viper.Viper) (Config, error) {
-	if v == nil {
-		return Config{}, fmt.Errorf("load configuration: viper instance is nil")
+// loadFrom loads configuration through an injected lookup without global state or process mutation.
+func loadFrom(lookup func(string) (string, bool)) (Config, error) {
+	cfg := defaultConfig()
+
+	// Explicit empty values must outrank defaults so required settings fail closed.
+	loadEnvironment(lookup, "APP_ENVIRONMENT", &cfg.Environment)
+	loadTrimmedString(lookup, "APP_HTTP_ADDRESS", &cfg.HTTP.Address)
+	loadTrimmedString(lookup, "APP_DB_HOST", &cfg.DB.Host)
+	loadString(lookup, "APP_DB_USER", &cfg.DB.User)
+	loadString(lookup, "APP_DB_PASSWORD", &cfg.DB.Password)
+	loadString(lookup, "APP_DB_NAME", &cfg.DB.Name)
+	loadString(lookup, "APP_JWT_KEY", &cfg.JWT.Key)
+	loadString(lookup, "APP_JWT_ISSUER", &cfg.JWT.Issuer)
+	loadString(lookup, "APP_JWT_AUDIENCE", &cfg.JWT.Audience)
+
+	// Explicit field assignments keep the accepted environment surface auditable and fail on weak coercion.
+	if err := loadDuration(lookup, "APP_HTTP_READ_HEADER_TIMEOUT", &cfg.HTTP.ReadHeaderTimeout); err != nil {
+		return Config{}, err
 	}
-	configureViper(v)
-	if err := bindEnvironment(v); err != nil {
-		return Config{}, fmt.Errorf("load configuration environment: %w", err)
+	if err := loadDuration(lookup, "APP_HTTP_READ_TIMEOUT", &cfg.HTTP.ReadTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_HTTP_WRITE_TIMEOUT", &cfg.HTTP.WriteTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_HTTP_IDLE_TIMEOUT", &cfg.HTTP.IdleTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_HTTP_SHUTDOWN_TIMEOUT", &cfg.HTTP.ShutdownTimeout); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_HTTP_MAX_BODY_BYTES", &cfg.HTTP.MaxBodyBytes); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt(lookup, "APP_DB_PORT", &cfg.DB.Port); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt(lookup, "APP_DB_MAX_IDLE", &cfg.DB.MaxIdle); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt(lookup, "APP_DB_MAX_OPEN", &cfg.DB.MaxOpen); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_DB_CONN_MAX_LIFETIME", &cfg.DB.ConnMaxLifetime); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_DB_CONN_MAX_IDLE_TIME", &cfg.DB.ConnMaxIdleTime); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_JWT_ACCESS_TTL", &cfg.JWT.AccessTTL); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_JWT_REFRESH_TTL", &cfg.JWT.RefreshTTL); err != nil {
+		return Config{}, err
+	}
+	if err := loadDuration(lookup, "APP_JWT_LEEWAY", &cfg.JWT.Leeway); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_PASSWORD_MEMORY", &cfg.Password.Memory); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_PASSWORD_ITERATIONS", &cfg.Password.Iterations); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_PASSWORD_PARALLELISM", &cfg.Password.Parallelism); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_PASSWORD_SALT_LENGTH", &cfg.Password.SaltLength); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt64(lookup, "APP_PASSWORD_KEY_LENGTH", &cfg.Password.KeyLength); err != nil {
+		return Config{}, err
+	}
+	if err := loadStringList(lookup, "APP_CORS_ALLOWED_ORIGINS", &cfg.CORS.AllowedOrigins); err != nil {
+		return Config{}, err
+	}
+	if err := loadBool(lookup, "APP_CORS_ALLOW_CREDENTIALS", &cfg.CORS.AllowCredentials); err != nil {
+		return Config{}, err
+	}
+	if err := loadFloat64(lookup, "APP_RATE_LIMIT_LOGIN_REQUESTS_PER_SECOND", &cfg.RateLimit.LoginRequestsPerSecond); err != nil {
+		return Config{}, err
+	}
+	if err := loadInt(lookup, "APP_RATE_LIMIT_LOGIN_BURST", &cfg.RateLimit.LoginBurst); err != nil {
+		return Config{}, err
 	}
 
-	if path := strings.TrimSpace(v.GetString("config")); path != "" {
-		v.SetConfigFile(path)
-	}
-	if path := v.ConfigFileUsed(); path != "" {
-		if err := v.ReadInConfig(); err != nil {
-			return Config{}, fmt.Errorf("read configuration file %q: %w", path, err)
-		}
-	}
-
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return Config{}, fmt.Errorf("decode configuration: %w", err)
-	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, fmt.Errorf("validate configuration: %w", err)
 	}
@@ -222,25 +289,104 @@ func (d Database) DSN() string {
 	return cfg.FormatDSN()
 }
 
-func configureViper(v *viper.Viper) {
-	v.SetEnvPrefix("APP")
-	v.SetEnvKeyReplacer(strings.NewReplacer("-", "_", ".", "_"))
-	// Explicit empty values must outrank files/defaults so required settings fail closed.
-	v.AllowEmptyEnv(true)
-	v.AutomaticEnv()
-	for _, item := range configDefaults {
-		v.SetDefault(item.key, item.value)
+func loadEnvironment(lookup func(string) (string, bool), key string, target *string) {
+	if value, ok := lookup(key); ok {
+		*target = strings.ToLower(strings.TrimSpace(value))
 	}
 }
 
-func bindEnvironment(v *viper.Viper) error {
-	for _, item := range configDefaults {
-		envName := "APP_" + strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(item.key))
-		// Explicit binding is required even with AutomaticEnv because Unmarshal only walks known keys.
-		if err := v.BindEnv(item.key, envName); err != nil {
-			return fmt.Errorf("bind %s to %s: %w", item.key, envName, err)
+func loadString(lookup func(string) (string, bool), key string, target *string) {
+	if value, ok := lookup(key); ok {
+		*target = value
+	}
+}
+
+func loadTrimmedString(lookup func(string) (string, bool), key string, target *string) {
+	if value, ok := lookup(key); ok {
+		*target = strings.TrimSpace(value)
+	}
+}
+
+func loadInt(lookup func(string) (string, bool), key string, target *int) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid base-10 integer", key)
+	}
+	*target = parsed
+	return nil
+}
+
+func loadInt64(lookup func(string) (string, bool), key string, target *int64) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid signed 64-bit integer", key)
+	}
+	*target = parsed
+	return nil
+}
+
+func loadBool(lookup func(string) (string, bool), key string, target *bool) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid boolean", key)
+	}
+	*target = parsed
+	return nil
+}
+
+func loadFloat64(lookup func(string) (string, bool), key string, target *float64) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return fmt.Errorf("%s must be a valid finite number", key)
+	}
+	*target = parsed
+	return nil
+}
+
+func loadDuration(lookup func(string) (string, bool), key string, target *time.Duration) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+	parsed, err := time.ParseDuration(value)
+	if err != nil {
+		return fmt.Errorf("%s must be a valid duration", key)
+	}
+	*target = parsed
+	return nil
+}
+
+func loadStringList(lookup func(string) (string, bool), key string, target *[]string) error {
+	value, ok := lookup(key)
+	if !ok {
+		return nil
+	}
+
+	parts := strings.Split(value, ",")
+	parsed := make([]string, len(parts))
+	for index, part := range parts {
+		parsed[index] = strings.TrimSpace(part)
+		if parsed[index] == "" {
+			return fmt.Errorf("%s must not contain an empty element", key)
 		}
 	}
+	*target = parsed
 	return nil
 }
 
@@ -329,6 +475,9 @@ func (j JWT) validate(environment string) error {
 	}
 	if j.AccessTTL <= 0 {
 		return fmt.Errorf("access TTL must be positive")
+	}
+	if j.Leeway < 0 || j.Leeway > maximumJWTLeeway || j.Leeway > j.AccessTTL {
+		return fmt.Errorf("leeway must be non-negative and no greater than %s or the access TTL", maximumJWTLeeway)
 	}
 	if j.RefreshTTL <= 0 {
 		return fmt.Errorf("refresh TTL must be positive")
