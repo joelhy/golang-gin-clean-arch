@@ -365,6 +365,8 @@ Authorization、密码、密码哈希、Refresh Token、数据库凭据和完整
 
 配置加载只使用标准库读取 `APP_*` 环境变量并执行显式类型转换，不引入 Viper，也不实现隐式配置文件合并。管理 CLI 的参数只覆盖该次命令自身的输入，不充当第二套应用配置源。
 
+`cmd/admin` 使用 `github.com/urfave/cli/v3` 构建命令树和解析命令参数，不使用 Cobra 或标准库 `flag` 直接组织 CLI。urfave/cli 只存在于命令适配层，领域与配置包不导入它。
+
 `.env` 只作为本地开发便利，生产环境不依赖它。仓库不提供可直接用于生产的默认密码或 JWT 密钥。
 
 服务使用注入的 `*slog.Logger`。开发模式可以使用文本 Handler，生产模式使用 JSON Handler。错误沿调用链返回，只在 HTTP 或命令入口等系统边界记录，避免同一错误被重复记录。

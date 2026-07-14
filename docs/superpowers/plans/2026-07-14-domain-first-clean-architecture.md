@@ -6,7 +6,7 @@
 
 **Architecture:** `user`、`product`、`order` 与 `reporting` 包拥有业务规则和消费方端口；`mysqlstore`、`security` 与 `web` 是外层适配器；`cmd/server` 和 `cmd/admin` 使用 Wire 显式组装。版本化 SQL 是数据库结构的唯一事实来源，跨库存与订单的写操作始终位于同一 MySQL 事务内。
 
-**Tech Stack:** Go 1.25.12、Gin 1.12、GORM 1.31、GORM Gen 0.3、MySQL 8.4、Wire 0.7、Cobra 1.10、golang-jwt/jwt v5、Argon2id、golang-migrate v4、Testcontainers-Go 0.43、标准库 `os`/`testing`/`httptest`/`log/slog`。
+**Tech Stack:** Go 1.25.12、Gin 1.12、GORM 1.31、GORM Gen 0.3、MySQL 8.4、Wire 0.7、urfave/cli v3.10、golang-jwt/jwt v5、Argon2id、golang-migrate v4、Testcontainers-Go 0.43、标准库 `os`/`testing`/`httptest`/`log/slog`。
 
 ---
 
@@ -17,8 +17,8 @@ The user explicitly removed Viper after Task 4. This section supersedes the Vipe
 - `config` reads `APP_*` variables through `os.LookupEnv` and strict standard-library parsers.
 - There is no implicit YAML/JSON configuration-file merge and no global configuration state.
 - An explicitly present empty environment value overrides defaults and then fails validation when the field is required.
-- Cobra remains only as the `cmd/admin` command router; it does not bind or merge application configuration. If Cobra is removed by a later user instruction, Task 13 switches to `flag.FlagSet` factories.
-- Task 4A removes Viper from source and the module graph before Task 5 starts.
+- `cmd/admin` uses `github.com/urfave/cli/v3`; neither Cobra nor direct standard-library `flag` parsing is used for the command tree.
+- Task 4A removes Cobra and Viper from source/module graph and pins urfave/cli before Task 5 starts.
 
 ## File map
 
@@ -511,7 +511,7 @@ Remove `NewViper`, `LoadWith`, mapstructure tags and configuration-file behavior
 
 - [ ] **Step 4: Remove Viper from the module graph**
 
-Remove the direct Viper requirement. Run `go mod tidy`, then restore the implementation plan's still-unused pinned future dependencies as explicit indirect requirements, excluding Viper. Verify `go list -deps ./...` and `go mod why -m github.com/spf13/viper` show no source dependency.
+Remove the direct Cobra and Viper requirements. Pin `github.com/urfave/cli/v3@v3.10.1` for Task 13. Run `go mod tidy`, then restore the implementation plan's still-unused pinned future dependencies as explicit indirect requirements, excluding Cobra and Viper. Verify `go list -deps ./...` and `go mod why` show no Cobra/Viper source dependency.
 
 - [ ] **Step 5: Verify and commit**
 
@@ -1183,7 +1183,7 @@ git add reporting mysqlstore web
 git commit -m "feat(api): 实现订单统计与完整路由"
 ```
 
-### Task 13: Cobra admin CLI, Wire composition, and graceful server
+### Task 13: urfave/cli admin CLI, Wire composition, and graceful server
 
 **Files:**
 - Delete: `cmd/main.go`
@@ -1223,9 +1223,9 @@ Run: `go test ./cmd/admin ./cmd/server -v`
 
 Expected: FAIL because command and server packages are absent.
 
-- [ ] **Step 4: Implement Cobra command factories**
+- [ ] **Step 4: Implement urfave/cli command factories**
 
-`NewRootCmd` loads application settings once through the standard-library `config.Load`; command-specific flags remain local to the command and do not form a second configuration merge layer. Commands use `RunE`, `SilenceUsage`, `SilenceErrors`, command Context, and injected functions. No package globals. `migrate down` requires `--steps > 0` and `--confirm`. `bootstrap-admin` calls `user.Service.BootstrapAdmin`; password comes from a flag only when explicitly supplied, otherwise from a no-echo terminal prompt. Never print the password.
+`NewApp` constructs a fresh `*cli.Command` tree, loads application settings once through the standard-library `config.Load`, and keeps command-specific flags local to each command. Actions accept `context.Context` and `*cli.Command`, return errors, and call injected functions; no package globals or process exits below `main`. `migrate down` requires `--steps > 0` and `--confirm`. `bootstrap-admin` calls `user.Service.BootstrapAdmin`; password comes from a flag only when explicitly supplied, otherwise from a no-echo terminal prompt. Never print the password.
 
 - [ ] **Step 5: Implement server lifecycle**
 
@@ -1279,7 +1279,7 @@ func TestDomainPackagesDoNotImportAdapters(t *testing.T) {
 	for _, pkg := range []string{"./user", "./product", "./order", "./reporting"} {
 		cmd := exec.CommandContext(t.Context(), "go", "list", "-f", `{{join .Imports "\n"}}`, pkg)
 		out, err := cmd.Output(); if err != nil { t.Fatal(err) }
-		for _, forbidden := range []string{"gin-gonic", "gorm.io", "go-sql-driver", "golang-jwt", "cobra", "viper"} {
+		for _, forbidden := range []string{"gin-gonic", "gorm.io", "go-sql-driver", "golang-jwt", "urfave/cli", "cobra", "viper"} {
 			if bytes.Contains(out, []byte(forbidden)) { t.Errorf("%s imports %s", pkg, forbidden) }
 		}
 	}
