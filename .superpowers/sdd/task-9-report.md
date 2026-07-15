@@ -162,3 +162,149 @@ Result: PASS
 1. The current order port does not provide the cancelling actor identity to persistence during `Cancel`, only the locked order data. Because `stock_adjustments.actor_user_id` is required, cancellation ledger rows are currently attributed to the order owner (`order.UserID`) rather than the admin actor when an admin performs the cancellation.
 2. `TestOrderStore` is accurate but expensive because each subtest provisions a fresh MySQL container via `newTestDB(t)`. This is correct for isolation and matched existing repo style, but the suite takes about 249 seconds.
 
+## Task 9 review-finding fix: stock ledger actor attribution
+
+### What changed
+
+- Added `ActorUserID` to the consumer-owned `order.StockChange` value so stock movement audit identity crosses the domain port without leaking MySQL details into `order`.
+- Updated checkout stock deductions in `order.Service.Create` to carry the customer user ID on each `DecreaseStock` call.
+- Updated cancellation stock restoration in `order.Service.Cancel` to carry the cancelling actor’s user ID through `IncreaseStock`, including admin cancellation of another user’s order.
+- Updated `mysqlstore/order_store.go` to persist actor attribution per pending ledger entry instead of inferring cancellation actor from the order owner during ledger flush.
+- Extended unit and integration coverage so:
+  - checkout deductions record the customer actor
+  - owner cancellation records the owner actor
+  - admin cancellation records the admin actor in `stock_adjustments.actor_user_id`
+
+### RED evidence
+
+I wrote the failing tests first, then ran the scoped RED commands before changing production code.
+
+Command:
+
+```text
+go test ./order -run 'TestCreate|TestServiceCancel' -v
+```
+
+Output:
+
+```text
+# clean-arch-gin/order [clean-arch-gin/order.test]
+order/service_test.go:252:29: unknown field ActorUserID in struct literal of type StockChange
+order/service_test.go:253:29: unknown field ActorUserID in struct literal of type StockChange
+order/service_test.go:451:29: unknown field ActorUserID in struct literal of type StockChange
+order/service_test.go:452:29: unknown field ActorUserID in struct literal of type StockChange
+order/service_test.go:483:29: unknown field ActorUserID in struct literal of type StockChange
+order/service_test.go:484:29: unknown field ActorUserID in struct literal of type StockChange
+FAIL    clean-arch-gin/order [build failed]
+FAIL
+```
+
+Command:
+
+```text
+go test -tags=integration ./mysqlstore -run 'TestOrderStore/CancellationRestoresStock' -v
+```
+
+Output:
+
+```text
+--- FAIL: TestOrderStore (28.20s)
+    --- FAIL: TestOrderStore/CancellationRestoresStock (28.20s)
+        order_store_test.go:389: product 1 latest stock adjustment actor_user_id = 1, want 2
+FAIL
+FAIL    clean-arch-gin/mysqlstore    28.264s
+FAIL
+```
+
+### GREEN verification
+
+Command:
+
+```text
+go test ./order -run 'TestCreate|TestServiceCancel' -v
+```
+
+Output:
+
+```text
+=== RUN   TestServiceCancelEnforcesPermissionsAndRestoresInventory
+=== RUN   TestServiceCancelEnforcesPermissionsAndRestoresInventory/owner_can_cancel_and_restore_stock
+=== RUN   TestServiceCancelEnforcesPermissionsAndRestoresInventory/non_owner_is_forbidden
+=== RUN   TestServiceCancelEnforcesPermissionsAndRestoresInventory/admin_can_cancel_any_order
+--- PASS: TestServiceCancelEnforcesPermissionsAndRestoresInventory (0.00s)
+    --- PASS: TestServiceCancelEnforcesPermissionsAndRestoresInventory/owner_can_cancel_and_restore_stock (0.00s)
+    --- PASS: TestServiceCancelEnforcesPermissionsAndRestoresInventory/non_owner_is_forbidden (0.00s)
+    --- PASS: TestServiceCancelEnforcesPermissionsAndRestoresInventory/admin_can_cancel_any_order (0.00s)
+PASS
+ok      clean-arch-gin/order    0.006s
+```
+
+Command:
+
+```text
+go test ./order -race
+```
+
+Output:
+
+```text
+ok      clean-arch-gin/order    1.030s
+```
+
+Command:
+
+```text
+go test -run '^$' -tags=integration ./mysqlstore
+```
+
+Output:
+
+```text
+ok      clean-arch-gin/mysqlstore    0.056s [no tests to run]
+```
+
+Command:
+
+```text
+go test -tags=integration ./mysqlstore -run 'TestOrderStore/CancellationRestoresStock' -v
+```
+
+Output:
+
+```text
+--- PASS: TestOrderStore (23.55s)
+    --- PASS: TestOrderStore/CancellationRestoresStock (23.55s)
+PASS
+ok      clean-arch-gin/mysqlstore    23.615s
+```
+
+Command:
+
+```text
+go vet ./order ./mysqlstore/...
+```
+
+Output:
+
+```text
+PASS
+```
+
+### Files changed
+
+- `order/types.go`
+- `order/service.go`
+- `order/service_test.go`
+- `mysqlstore/order_store.go`
+- `mysqlstore/order_store_test.go`
+- `.superpowers/sdd/task-9-report.md`
+
+### Self-review
+
+- The fix stays at the consumer-owned port boundary by extending `order.StockChange` instead of introducing storage-specific actor plumbing into the `order` package.
+- `mysqlstore` now persists the actor that came with each stock movement, which removes the previous cancellation fallback to `order.UserID`.
+- Comments were preserved; no new comments were added beyond the existing audit/transaction notes because the new data flow is direct in code.
+
+### Concerns
+
+- Minor follow-up only: retry behavior for MySQL deadlock `1213` and lock wait timeout `1205` still lacks focused coverage. I did not expand that here because this fix did not naturally create a low-cost seam, and the review finding was specifically about actor attribution.

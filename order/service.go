@@ -109,19 +109,19 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 }
 
 func (s *Service) Confirm(ctx context.Context, orderID uint64, expectedVersion uint64) (*Order, error) {
-	return s.advance(ctx, orderID, expectedVersion, "confirm", func(order *Order, now time.Time) error {
+	return s.advance(ctx, orderID, expectedVersion, "confirm", 0, func(order *Order, now time.Time) error {
 		return order.Confirm(now)
 	}, false)
 }
 
 func (s *Service) Ship(ctx context.Context, orderID uint64, expectedVersion uint64) (*Order, error) {
-	return s.advance(ctx, orderID, expectedVersion, "ship", func(order *Order, now time.Time) error {
+	return s.advance(ctx, orderID, expectedVersion, "ship", 0, func(order *Order, now time.Time) error {
 		return order.Ship(now)
 	}, false)
 }
 
 func (s *Service) Deliver(ctx context.Context, orderID uint64, expectedVersion uint64) (*Order, error) {
-	return s.advance(ctx, orderID, expectedVersion, "deliver", func(order *Order, now time.Time) error {
+	return s.advance(ctx, orderID, expectedVersion, "deliver", 0, func(order *Order, now time.Time) error {
 		return order.Deliver(now)
 	}, false)
 }
@@ -145,7 +145,7 @@ func (s *Service) Cancel(ctx context.Context, actor Actor, orderID uint64, expec
 		}
 	}
 
-	return s.advance(ctx, orderID, expectedVersion, "cancel", func(order *Order, now time.Time) error {
+	return s.advance(ctx, orderID, expectedVersion, "cancel", actor.UserID, func(order *Order, now time.Time) error {
 		if err := order.Cancel(now); err != nil {
 			return err
 		}
@@ -214,7 +214,11 @@ func (s *Service) buildOrder(ctx context.Context, tx Tx, userID uint64, items []
 	// Inventory is decremented from the locked server-side snapshot so clients can
 	// never smuggle stale prices or stock assumptions into the persisted order.
 	for _, item := range order.Items {
-		if err := tx.DecreaseStock(ctx, StockChange{ProductID: item.ProductID, Delta: -int64(item.Quantity)}); err != nil {
+		if err := tx.DecreaseStock(ctx, StockChange{
+			ProductID:   item.ProductID,
+			Delta:       -int64(item.Quantity),
+			ActorUserID: userID,
+		}); err != nil {
 			return nil, fmt.Errorf("decrease stock for product %d: %w", item.ProductID, err)
 		}
 	}
@@ -227,6 +231,7 @@ func (s *Service) advance(
 	orderID uint64,
 	expectedVersion uint64,
 	action string,
+	actorUserID uint64,
 	apply func(*Order, time.Time) error,
 	restoreInventory bool,
 ) (*Order, error) {
@@ -244,7 +249,11 @@ func (s *Service) advance(
 		}
 		if restoreInventory {
 			for _, item := range order.Items {
-				if err := tx.IncreaseStock(ctx, StockChange{ProductID: item.ProductID, Delta: int64(item.Quantity)}); err != nil {
+				if err := tx.IncreaseStock(ctx, StockChange{
+					ProductID:   item.ProductID,
+					Delta:       int64(item.Quantity),
+					ActorUserID: actorUserID,
+				}); err != nil {
 					return fmt.Errorf("restore stock for product %d: %w", item.ProductID, err)
 				}
 			}

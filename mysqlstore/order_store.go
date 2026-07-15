@@ -36,7 +36,6 @@ type orderStoreTx struct {
 	db *gorm.DB
 	q  *query.Query
 
-	actorUserID     uint64
 	lockedProducts  map[uint64]*lockedProductState
 	lockedOrder     *order.Order
 	pendingLedger   []pendingStockAdjustment
@@ -55,10 +54,11 @@ type lockedProductState struct {
 }
 
 type pendingStockAdjustment struct {
-	productID  uint64
-	delta      int32
-	stockAfter uint32
-	reason     string
+	productID   uint64
+	delta       int32
+	stockAfter  uint32
+	reason      string
+	actorUserID uint64
 }
 
 var _ order.Transactor = (*OrderStore)(nil)
@@ -208,7 +208,6 @@ func (tx *orderStoreTx) ClaimIdempotency(ctx context.Context, claim order.Idempo
 		UpdatedAt:      claim.CreatedAt.UTC(),
 	}
 	if err := tx.q.IdempotencyKey.WithContext(ctx).Create(row); err == nil {
-		tx.actorUserID = claim.UserID
 		return order.IdempotencyResult{Kind: order.IdempotencyClaimed}, nil
 	} else if !isDuplicateKeyError(err) {
 		return order.IdempotencyResult{}, fmt.Errorf("claim idempotency: insert claim: %w", err)
@@ -230,7 +229,6 @@ func (tx *orderStoreTx) ClaimIdempotency(ctx context.Context, claim order.Idempo
 	if len(existing.RequestHash) != len(claim.RequestHash) || !slices.Equal(existing.RequestHash, claim.RequestHash[:]) {
 		return order.IdempotencyResult{Kind: order.IdempotencyConflict}, nil
 	}
-	tx.actorUserID = claim.UserID
 	if existing.OrderID != nil {
 		return order.IdempotencyResult{Kind: order.IdempotencyReplay, OrderID: *existing.OrderID}, nil
 	}
@@ -326,10 +324,11 @@ func (tx *orderStoreTx) applyStockChange(ctx context.Context, change order.Stock
 	state.stock = nextStock
 	state.version++
 	tx.pendingLedger = append(tx.pendingLedger, pendingStockAdjustment{
-		productID:  change.ProductID,
-		delta:      delta,
-		stockAfter: nextStock,
-		reason:     reason,
+		productID:   change.ProductID,
+		delta:       delta,
+		stockAfter:  nextStock,
+		reason:      reason,
+		actorUserID: change.ActorUserID,
 	})
 	return nil
 }
@@ -372,7 +371,7 @@ func (tx *orderStoreTx) CreateOrder(ctx context.Context, item *order.Order) erro
 		item.Items[i].ID = orderItem.ID
 	}
 
-	if err := tx.flushPendingLedger(ctx, row.ID, item.UserID, item.CreatedAt, true); err != nil {
+	if err := tx.flushPendingLedger(ctx, row.ID, item.CreatedAt); err != nil {
 		return err
 	}
 	return nil
@@ -462,7 +461,7 @@ func (tx *orderStoreTx) UpdateStatus(ctx context.Context, item *order.Order, exp
 		}
 		return order.ErrNotFound
 	}
-	return tx.flushPendingLedger(ctx, item.ID, item.UserID, item.UpdatedAt, false)
+	return tx.flushPendingLedger(ctx, item.ID, item.UpdatedAt)
 }
 
 func (tx *orderStoreTx) orderExists(ctx context.Context, orderID uint64) (bool, error) {
@@ -486,13 +485,9 @@ func (tx *orderStoreTx) ensureCancellationProductsLocked(ctx context.Context) er
 	return err
 }
 
-func (tx *orderStoreTx) flushPendingLedger(ctx context.Context, orderID uint64, userID uint64, when time.Time, checkout bool) error {
+func (tx *orderStoreTx) flushPendingLedger(ctx context.Context, orderID uint64, when time.Time) error {
 	if tx.ledgerFlushed || len(tx.pendingLedger) == 0 {
 		return nil
-	}
-	actorUserID := userID
-	if checkout && tx.actorUserID != 0 {
-		actorUserID = tx.actorUserID
 	}
 	// Ledger rows are emitted only after the order row exists so the optional
 	// foreign key always points at the committed business record that caused stock
@@ -503,7 +498,7 @@ func (tx *orderStoreTx) flushPendingLedger(ctx context.Context, orderID uint64, 
 			Delta:       entry.delta,
 			StockAfter:  entry.stockAfter,
 			Reason:      entry.reason,
-			ActorUserID: actorUserID,
+			ActorUserID: entry.actorUserID,
 			OrderID:     &orderID,
 			CreatedAt:   when.UTC(),
 		}
