@@ -17,9 +17,8 @@ import (
 	"github.com/google/wire"
 )
 
-func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener) (serverRuntime, error) {
+func buildRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener, db databaseResource) (serverRuntime, error) {
 	wire.Build(
-		openDatabase,
 		gormDB,
 		provideServerRuntime,
 		provideRouter,
