@@ -259,6 +259,82 @@ go test -run '^$' -tags=integration ./mysqlstore
 
 Output:
 
+## Task 9 re-review finding 2 fix: cancellation lock path ignores active status
+
+### What changed
+
+- Kept checkout product locking on the active-only path.
+- Added a cancellation-specific product lock path in `mysqlstore/order_store.go` that locks products by ID without filtering on product status, while preserving the existing deterministic ID ordering.
+- Updated cancellation stock restoration to call the cancellation-specific lock path instead of reusing the checkout-only lock.
+- Extended `mysqlstore/order_store_test.go` so `CancellationRestoresStock` now:
+  - creates an order
+  - marks the purchased products inactive after checkout
+  - cancels the order successfully
+  - verifies stock is restored and stock adjustment rows are written
+
+### RED evidence
+
+I updated the regression first, then ran the required focused test before changing production code.
+
+Command:
+
+```text
+go test -tags=integration ./mysqlstore -run 'TestOrderStore/CancellationRestoresStock' -v
+```
+
+Output:
+
+```text
+--- FAIL: TestOrderStore (35.58s)
+    --- FAIL: TestOrderStore/CancellationRestoresStock (35.58s)
+        order_store_test.go:394: Cancel() error = cancel order 1: restore stock for product 1: not found
+FAIL
+FAIL    clean-arch-gin/mysqlstore  35.649s
+FAIL
+```
+
+### GREEN evidence
+
+After the adapter change, the same regression passed.
+
+Command:
+
+```text
+go test -tags=integration ./mysqlstore -run 'TestOrderStore/CancellationRestoresStock' -v
+```
+
+Output:
+
+```text
+--- PASS: TestOrderStore (36.93s)
+    --- PASS: TestOrderStore/CancellationRestoresStock (36.93s)
+PASS
+ok      clean-arch-gin/mysqlstore  36.993s
+```
+
+### Commands and results
+
+- `go test -tags=integration ./mysqlstore -run 'TestOrderStore/CancellationRestoresStock' -v` - PASS
+- `go test -run '^$' -tags=integration ./mysqlstore` - PASS
+- `go vet ./mysqlstore/...` - PASS
+
+### Files changed
+
+- `mysqlstore/order_store.go`
+- `mysqlstore/order_store_test.go`
+- `.superpowers/sdd/task-9-report.md`
+
+### Self-review
+
+- Checkout still uses the active-only product lock path.
+- Cancellation now uses a status-agnostic product lock path and keeps product IDs ordered before locking.
+- The regression covers the inactive-product cancellation case and verifies ledger persistence.
+- No changes were made outside the MySQL order adapter and its integration test.
+
+### Concerns
+
+- None.
+
 ```text
 ok      clean-arch-gin/mysqlstore    0.056s [no tests to run]
 ```
