@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -148,6 +149,32 @@ func TestCORSRejectsDisallowedPreflight(t *testing.T) {
 	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
+func TestMiddlewareLogsDeniedPreflightWithFinal403(t *testing.T) {
+	logger, logBuffer := testLogger()
+
+	engine := gin.New()
+	if err := UseStandard(engine, MiddlewareOptions{
+		Logger: logger,
+		CORS: CORSOptions{
+			AllowedOrigins: []string{"https://app.example.com"},
+		},
+	}); err != nil {
+		t.Fatalf("UseStandard() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodOptions, "/", nil)
+	req.Header.Set("Origin", "https://evil.example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
+	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
+	assertLogStatus(t, logBuffer.String(), http.StatusForbidden)
+}
+
 func TestMiddlewareTrustedProxiesSupport(t *testing.T) {
 	engine := gin.New()
 	if err := UseStandard(engine, MiddlewareOptions{
@@ -181,6 +208,26 @@ func TestMiddlewareMaxBodyBytes(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"name":"alice"}`))
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
+}
+
+func TestMiddlewareMaxBodyBytesUnknownLengthReturnsEnvelopeWhenHandlerIgnoresReadError(t *testing.T) {
+	engine := gin.New()
+	engine.Use(MaxBodyBytes(8))
+	engine.POST("/", func(c *gin.Context) {
+		_, _ = io.ReadAll(c.Request.Body)
+		// Handlers can miss the body-limit read error; middleware must still prevent a success body from escaping.
+		writeSuccess(c, http.StatusOK, gin.H{"accepted": true})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"name":"alice"}`))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
 	engine.ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusRequestEntityTooLarge {
@@ -269,6 +316,30 @@ func TestMiddlewareCanceledContextReturns499(t *testing.T) {
 	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
+func TestMiddlewareLogsCanceledRequestWithFinal499(t *testing.T) {
+	logger, logBuffer := testLogger()
+
+	engine := gin.New()
+	if err := UseStandard(engine, MiddlewareOptions{Logger: logger}); err != nil {
+		t.Fatalf("UseStandard() error = %v", err)
+	}
+	engine.GET("/", func(c *gin.Context) {
+		<-c.Request.Context().Done()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/", nil).WithContext(ctx)
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != 499 {
+		t.Fatalf("status = %d, want 499", rec.Code)
+	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
+	assertLogStatus(t, logBuffer.String(), 499)
+}
+
 func testLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
@@ -294,5 +365,14 @@ func assertEnvelopeFailure(t *testing.T, body []byte) {
 		if _, ok := got[forbidden]; ok {
 			t.Fatalf("body contains forbidden key %q: %#v", forbidden, got)
 		}
+	}
+}
+
+func assertLogStatus(t *testing.T, logs string, status int) {
+	t.Helper()
+
+	want := `status=` + strconv.Itoa(status)
+	if !strings.Contains(logs, want) {
+		t.Fatalf("logs = %q, want substring %q", logs, want)
 	}
 }

@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -9,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -50,6 +52,7 @@ func UseStandard(engine *gin.Engine, opts MiddlewareOptions) error {
 	}
 
 	engine.Use(RequestID())
+	engine.Use(AccessLog(opts.Logger))
 	engine.Use(Recovery(opts.Logger))
 	engine.Use(SecurityHeaders())
 	engine.Use(ContextCancellation())
@@ -57,7 +60,6 @@ func UseStandard(engine *gin.Engine, opts MiddlewareOptions) error {
 		engine.Use(MaxBodyBytes(opts.MaxBodyBytes))
 	}
 	engine.Use(CORS(opts.CORS))
-	engine.Use(AccessLog(opts.Logger))
 	return nil
 }
 
@@ -168,8 +170,33 @@ func MaxBodyBytes(limit int64) gin.HandlerFunc {
 			})
 			return
 		}
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
+
+		originalWriter := c.Writer
+		// Chunked or otherwise unknown-length bodies can trip the limit only after downstream starts reading.
+		// Buffering that downstream response lets middleware replace an ignored read error with the standard 413 envelope.
+		bufferedWriter := newBufferedResponseWriter(originalWriter)
+		if c.Request.ContentLength < 0 {
+			c.Writer = bufferedWriter
+		}
+
+		body := &maxBodyReadCloser{
+			ReadCloser: http.MaxBytesReader(originalWriter, c.Request.Body, limit),
+		}
+		c.Request.Body = body
 		c.Next()
+		c.Writer = originalWriter
+
+		if c.Request.ContentLength < 0 {
+			if body.exceededLimit() && (!bufferedWriter.Written() || bufferedWriter.Status() < http.StatusBadRequest) {
+				writeFailure(c, http.StatusRequestEntityTooLarge, Problem{
+					Code:    CodeMalformedJSON,
+					Message: "request body too large",
+				})
+				return
+			}
+			bufferedWriter.Commit()
+		}
+
 		if err := c.Request.Body.Close(); err != nil && !errors.Is(err, http.ErrBodyReadAfterClose) {
 			return
 		}
@@ -396,4 +423,127 @@ func newRequestID() string {
 		return hex.EncodeToString([]byte(time.Now().UTC().Format(time.RFC3339Nano)))
 	}
 	return hex.EncodeToString(raw[:])
+}
+
+type maxBodyReadCloser struct {
+	io.ReadCloser
+	exceeded bool
+}
+
+func (r *maxBodyReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) {
+		r.exceeded = true
+	}
+	return n, err
+}
+
+func (r *maxBodyReadCloser) exceededLimit() bool {
+	return r.exceeded
+}
+
+type bufferedResponseWriter struct {
+	base   gin.ResponseWriter
+	header http.Header
+	body   bytes.Buffer
+	status int
+	size   int
+}
+
+func newBufferedResponseWriter(base gin.ResponseWriter) *bufferedResponseWriter {
+	header := make(http.Header, len(base.Header()))
+	for key, values := range base.Header() {
+		header[key] = append([]string(nil), values...)
+	}
+	return &bufferedResponseWriter{
+		base:   base,
+		header: header,
+		status: http.StatusOK,
+		size:   -1,
+	}
+}
+
+func (w *bufferedResponseWriter) Header() http.Header {
+	return w.header
+}
+
+func (w *bufferedResponseWriter) WriteHeader(code int) {
+	if code > 0 {
+		w.status = code
+	}
+}
+
+func (w *bufferedResponseWriter) WriteHeaderNow() {
+	if !w.Written() {
+		w.size = 0
+	}
+}
+
+func (w *bufferedResponseWriter) Write(data []byte) (int, error) {
+	w.WriteHeaderNow()
+	n, err := w.body.Write(data)
+	w.size += n
+	return n, err
+}
+
+func (w *bufferedResponseWriter) WriteString(s string) (int, error) {
+	w.WriteHeaderNow()
+	n, err := w.body.WriteString(s)
+	w.size += n
+	return n, err
+}
+
+func (w *bufferedResponseWriter) Status() int {
+	return w.status
+}
+
+func (w *bufferedResponseWriter) Size() int {
+	return w.size
+}
+
+func (w *bufferedResponseWriter) Written() bool {
+	return w.size >= 0
+}
+
+func (w *bufferedResponseWriter) Flush() {}
+
+func (w *bufferedResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	if hijacker, ok := w.base.(http.Hijacker); ok {
+		return hijacker.Hijack()
+	}
+	return nil, nil, http.ErrNotSupported
+}
+
+func (w *bufferedResponseWriter) CloseNotify() <-chan bool {
+	return w.base.CloseNotify()
+}
+
+func (w *bufferedResponseWriter) Pusher() http.Pusher {
+	return w.base.Pusher()
+}
+
+func (w *bufferedResponseWriter) Commit() {
+	dst := w.base.Header()
+	for key := range dst {
+		delete(dst, key)
+	}
+	for key, values := range w.header {
+		dst[key] = append([]string(nil), values...)
+	}
+
+	if !w.Written() {
+		if w.status != http.StatusOK {
+			w.base.WriteHeader(w.status)
+			w.base.WriteHeaderNow()
+		}
+		return
+	}
+
+	w.base.WriteHeader(w.status)
+	w.base.WriteHeaderNow()
+	if w.body.Len() == 0 {
+		return
+	}
+	_, _ = w.base.Write(w.body.Bytes())
 }
