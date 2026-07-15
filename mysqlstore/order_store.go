@@ -236,19 +236,25 @@ func (tx *orderStoreTx) ClaimIdempotency(ctx context.Context, claim order.Idempo
 }
 
 func (tx *orderStoreTx) LockProducts(ctx context.Context, ids []uint64) ([]order.SellableProduct, error) {
+	return tx.lockProducts(ctx, ids, true)
+}
+
+func (tx *orderStoreTx) lockProducts(ctx context.Context, ids []uint64, activeOnly bool) ([]order.SellableProduct, error) {
 	sortedIDs := normalizedSortedIDs(ids)
 	if len(sortedIDs) == 0 {
 		return nil, nil
 	}
 
-	rows, err := tx.q.Product.WithContext(ctx).
+	dao := tx.q.Product.WithContext(ctx).
 		Clauses(clause.Locking{Strength: "UPDATE"}).
-		Where(
-			tx.q.Product.ID.In(sortedIDs...),
-			tx.q.Product.Status.Eq(string(product.StatusActive)),
-		).
-		Order(tx.q.Product.ID.Asc()).
-		Find()
+		Where(tx.q.Product.ID.In(sortedIDs...))
+	if activeOnly {
+		// Checkout is intentionally restricted to active products; cancellation
+		// needs to restore historical stock even after a product has been hidden.
+		dao = dao.Where(tx.q.Product.Status.Eq(string(product.StatusActive)))
+	}
+
+	rows, err := dao.Order(tx.q.Product.ID.Asc()).Find()
 	if err != nil {
 		return nil, fmt.Errorf("lock products: %w", err)
 	}
@@ -481,7 +487,7 @@ func (tx *orderStoreTx) ensureCancellationProductsLocked(ctx context.Context) er
 	for _, item := range tx.lockedOrder.Items {
 		productIDs = append(productIDs, item.ProductID)
 	}
-	_, err := tx.LockProducts(ctx, productIDs)
+	_, err := tx.lockProducts(ctx, productIDs, false)
 	return err
 }
 

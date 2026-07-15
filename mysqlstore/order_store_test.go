@@ -375,6 +375,20 @@ func TestOrderStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
+
+		for _, productID := range []uint64{first.ID, second.ID} {
+			reloaded, err := store.ByID(t.Context(), productID, false)
+			if err != nil {
+				t.Fatalf("ByID(product %d before deactivate) error = %v", productID, err)
+			}
+			reloaded.Status = product.StatusInactive
+			reloaded.Version++
+			reloaded.UpdatedAt = now.Add(5 * time.Minute)
+			if err := store.Update(t.Context(), reloaded, reloaded.Version-1); err != nil {
+				t.Fatalf("Update(product %d to inactive) error = %v", productID, err)
+			}
+		}
+
 		cancelled, err := svc.Cancel(t.Context(), order.Actor{UserID: admin.ID, Admin: true}, created.ID, created.Version)
 		if err != nil {
 			t.Fatalf("Cancel() error = %v", err)
