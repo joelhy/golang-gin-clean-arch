@@ -254,12 +254,38 @@ func permissionsFromContext(c *gin.Context) []string {
 	return append([]string(nil), permissions...)
 }
 
-func actorFromContext(c *gin.Context) (user.Actor, bool) {
+func requireIdentityAndPermission(c *gin.Context, permission string) (user.Identity, []string, bool) {
 	identity, ok := identityFromContext(c)
+	if !ok {
+		writeFailure(c, http.StatusUnauthorized, Problem{
+			Code:    CodeAuthentication,
+			Message: "authentication failed",
+		})
+		return user.Identity{}, nil, false
+	}
+
+	permissions := permissionsFromContext(c)
+	// Handlers fail closed when route wiring omits or misorders RequirePermission.
+	// They only trust permission evidence that middleware has already attached.
+	for _, granted := range permissions {
+		if granted == permission {
+			return identity, permissions, true
+		}
+	}
+
+	writeFailure(c, http.StatusForbidden, Problem{
+		Code:    CodePermission,
+		Message: "permission denied",
+	})
+	return user.Identity{}, nil, false
+}
+
+func requireActorPermission(c *gin.Context, permission string) (user.Actor, bool) {
+	identity, permissions, ok := requireIdentityAndPermission(c, permission)
 	if !ok {
 		return user.Actor{}, false
 	}
-	return user.Actor{UserID: identity.UserID, Permissions: permissionsFromContext(c)}, true
+	return user.Actor{UserID: identity.UserID, Permissions: permissions}, true
 }
 
 func parseUintParam(c *gin.Context, key string) (uint64, *Problem) {

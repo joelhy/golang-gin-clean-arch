@@ -182,3 +182,109 @@ Results:
 ## Concerns
 
 - None.
+
+## Task 11 Review Fixes (2026-07-15)
+
+### What changed
+
+- Added a shared fail-closed permission-evidence helper in `web/auth_handler.go`.
+- Updated admin user handlers to require permission evidence from `RequirePermission()` before calling privileged services:
+  - `List`: `user.PermissionUsersRead`
+  - `SetStatus`: `user.PermissionUsersWrite`
+  - `ReplaceRoles`: `user.PermissionUsersRoles`
+  - `Permissions`: `user.PermissionUsersRead`
+- Updated admin product handlers to require permission evidence from `RequirePermission()` before calling privileged services:
+  - `Create`, `GetAdmin`, `Update`, `ListAdmin`, `Publish`, `Unpublish`: `user.PermissionProductsWrite`
+  - `AdjustStock`: `user.PermissionProductsStock`
+- Removed unused `productActorFromIdentity`.
+- Added focused regression tests that mount admin handlers with identity but without permission middleware and assert the service is not called.
+
+### RED evidence
+
+Added failing tests first in:
+
+- `web/user_handler_test.go`
+- `web/product_handler_test.go`
+
+Ran:
+
+```bash
+go test ./web -run 'TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence|TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence' -v
+```
+
+Observed RED because miswired admin routes still reached privileged services:
+
+```text
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/create
+    product_handler_test.go:310: status = 201, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/get_admin
+    product_handler_test.go:331: status = 200, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/list_admin
+    product_handler_test.go:352: status = 200, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/update
+    product_handler_test.go:373: status = 200, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/publish
+    product_handler_test.go:394: status = 200, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/unpublish
+    product_handler_test.go:415: status = 200, want 403
+--- FAIL: TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence/adjust_stock
+    product_handler_test.go:436: status = 200, want 403
+--- FAIL: TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence/list
+    user_handler_test.go:241: status = 200, want 403
+--- FAIL: TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence/set_status
+    user_handler_test.go:262: status = 200, want 403
+--- FAIL: TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence/replace_roles
+    user_handler_test.go:283: status = 200, want 403
+--- FAIL: TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence/permissions
+    user_handler_test.go:304: status = 200, want 403
+FAIL
+```
+
+### GREEN evidence
+
+Implemented the minimal handler-side permission guard, then ran:
+
+```bash
+go test ./web -run 'TestAuthHandler|TestUserHandler|TestProductHandler' -v
+go test ./web -v
+go vet ./web
+```
+
+Results:
+
+- `go test ./web -run 'TestAuthHandler|TestUserHandler|TestProductHandler' -v`: PASS
+- `go test ./web -v`: PASS
+- `go vet ./web`: PASS
+
+### Commands and outputs
+
+- `gofmt -w web/auth_handler.go web/user_handler.go web/product_handler.go web/user_handler_test.go web/product_handler_test.go`
+  - exit 0
+- `go test ./web -run 'TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence|TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence' -v`
+  - exit 1 during RED, with 11 new authorization-proof failures
+- `go test ./web -run 'TestAuthHandler|TestUserHandler|TestProductHandler' -v`
+  - exit 0
+- `go test ./web -v`
+  - exit 0
+- `go vet ./web`
+  - exit 0
+
+### Files changed
+
+- `web/auth_handler.go`
+- `web/user_handler.go`
+- `web/product_handler.go`
+- `web/user_handler_test.go`
+- `web/product_handler_test.go`
+- `.superpowers/sdd/task-11-report.md`
+
+### Self-review
+
+- Handlers now trust only the permission evidence already attached by `RequirePermission()`.
+- Miswired admin routes with identity but without permission evidence fail closed with the existing failure envelope.
+- Product stock adjustment still builds the same actor payload, but only after `products:stock` evidence is present.
+- DTOs, success envelopes, and failure envelopes were not widened or reshaped.
+
+### Concerns
+
+- None.

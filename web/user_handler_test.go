@@ -221,6 +221,94 @@ func TestUserHandlerPermissions(t *testing.T) {
 	assertJSONPath(t, rec.Body.Bytes(), "data.permissions.0", "users:read")
 }
 
+func TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence(t *testing.T) {
+	t.Setenv("GIN_MODE", gin.TestMode)
+
+	t.Run("list", func(t *testing.T) {
+		called := false
+		handler := NewUserHandler(fakeUserHandlerService{
+			listFn: func(_ context.Context, _ user.Actor, _ user.ListFilter) (user.Page, error) {
+				called = true
+				return user.Page{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.GET("/api/v1/admin/users", injectIdentity(user.Identity{UserID: 77}), handler.List)
+
+		rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/users", nil, nil)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("List must not run without permission evidence")
+		}
+	})
+
+	t.Run("set_status", func(t *testing.T) {
+		called := false
+		handler := NewUserHandler(fakeUserHandlerService{
+			setStatusFn: func(_ context.Context, _ user.Actor, _ user.SetStatusInput) error {
+				called = true
+				return nil
+			},
+		})
+
+		router := gin.New()
+		router.PATCH("/api/v1/admin/users/:id/status", injectIdentity(user.Identity{UserID: 77}), handler.SetStatus)
+
+		rec := performJSON(t, router, http.MethodPatch, "/api/v1/admin/users/15/status", `{"status":"disabled","version":9}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("SetStatus must not run without permission evidence")
+		}
+	})
+
+	t.Run("replace_roles", func(t *testing.T) {
+		called := false
+		handler := NewUserHandler(fakeUserHandlerService{
+			replaceRolesFn: func(_ context.Context, _ user.Actor, _ user.ReplaceRolesInput) error {
+				called = true
+				return nil
+			},
+		})
+
+		router := gin.New()
+		router.PUT("/api/v1/admin/users/:id/roles", injectIdentity(user.Identity{UserID: 77}), handler.ReplaceRoles)
+
+		rec := performJSON(t, router, http.MethodPut, "/api/v1/admin/users/15/roles", `{"roles":["admin"],"version":2}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("ReplaceRoles must not run without permission evidence")
+		}
+	})
+
+	t.Run("permissions", func(t *testing.T) {
+		called := false
+		handler := NewUserHandler(fakeUserHandlerService{
+			permissionsFn: func(_ context.Context, _ uint64) ([]string, error) {
+				called = true
+				return nil, nil
+			},
+		})
+
+		router := gin.New()
+		router.GET("/api/v1/admin/users/:id/permissions", injectIdentity(user.Identity{UserID: 77}), handler.Permissions)
+
+		rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/users/15/permissions", nil, nil)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("Permissions must not run without permission evidence")
+		}
+	})
+}
+
 func injectIdentity(identity user.Identity) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		setIdentity(c, identity)

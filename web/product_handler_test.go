@@ -289,3 +289,154 @@ func TestProductHandlerAdjustStock(t *testing.T) {
 	assertStatusCode(t, rec, http.StatusOK)
 	assertJSONPath(t, rec.Body.Bytes(), "data.stock", float64(7))
 }
+
+func TestProductHandlerAdminRoutesFailClosedWithoutPermissionEvidence(t *testing.T) {
+	t.Setenv("GIN_MODE", gin.TestMode)
+
+	t.Run("create", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			createFn: func(_ context.Context, _ product.CreateInput) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.POST("/api/v1/admin/products", injectIdentity(user.Identity{UserID: 77}), handler.Create)
+
+		rec := performJSON(t, router, http.MethodPost, "/api/v1/admin/products", `{"sku":"sku-1","name":"Widget","description":"A widget","price":{"amount":1099,"currency":"USD"},"initial_stock":9}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("Create must not run without permission evidence")
+		}
+	})
+
+	t.Run("get_admin", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			adminByIDFn: func(_ context.Context, _ uint64) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.GET("/api/v1/admin/products/:id", injectIdentity(user.Identity{UserID: 77}), handler.GetAdmin)
+
+		rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/products/3", nil, nil)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("GetAdmin must not run without permission evidence")
+		}
+	})
+
+	t.Run("list_admin", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			listAdminFn: func(_ context.Context, _ product.ListFilter) (product.Page, error) {
+				called = true
+				return product.Page{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.GET("/api/v1/admin/products", injectIdentity(user.Identity{UserID: 77}), handler.ListAdmin)
+
+		rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/products?status=draft", nil, nil)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("ListAdmin must not run without permission evidence")
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			updateFn: func(_ context.Context, _ product.UpdateInput) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.PUT("/api/v1/admin/products/:id", injectIdentity(user.Identity{UserID: 77}), handler.Update)
+
+		rec := performJSON(t, router, http.MethodPut, "/api/v1/admin/products/3", `{"sku":"sku-1","name":"Widget 2","description":"Second","price":{"amount":2099,"currency":"USD"},"version":4}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("Update must not run without permission evidence")
+		}
+	})
+
+	t.Run("publish", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			publishFn: func(_ context.Context, _ uint64, _ uint64) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.POST("/api/v1/admin/products/:id/publish", injectIdentity(user.Identity{UserID: 77}), handler.Publish)
+
+		rec := performJSON(t, router, http.MethodPost, "/api/v1/admin/products/4/publish", `{"version":3}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("Publish must not run without permission evidence")
+		}
+	})
+
+	t.Run("unpublish", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			unpublishFn: func(_ context.Context, _ uint64, _ uint64) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.POST("/api/v1/admin/products/:id/unpublish", injectIdentity(user.Identity{UserID: 77}), handler.Unpublish)
+
+		rec := performJSON(t, router, http.MethodPost, "/api/v1/admin/products/4/unpublish", `{"version":4}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("Unpublish must not run without permission evidence")
+		}
+	})
+
+	t.Run("adjust_stock", func(t *testing.T) {
+		called := false
+		handler := NewProductHandler(fakeProductHandlerService{
+			adjustStockFn: func(_ context.Context, _ product.Actor, _ product.AdjustStockInput) (*product.Product, error) {
+				called = true
+				return &product.Product{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.POST("/api/v1/admin/products/:id/stock", injectIdentity(user.Identity{UserID: 77}), handler.AdjustStock)
+
+		rec := performJSON(t, router, http.MethodPost, "/api/v1/admin/products/4/stock", `{"delta":-2,"reason":"manual recount","version":5}`)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("AdjustStock must not run without permission evidence")
+		}
+	})
+}

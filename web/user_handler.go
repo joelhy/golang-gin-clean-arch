@@ -97,9 +97,8 @@ func (h *userHandler) UpdateMe(c *gin.Context) {
 }
 
 func (h *userHandler) List(c *gin.Context) {
-	actor, ok := actorFromContext(c)
+	actor, ok := requireActorPermission(c, user.PermissionUsersRead)
 	if !ok {
-		writeFailure(c, http.StatusUnauthorized, Problem{Code: CodeAuthentication, Message: "authentication failed"})
 		return
 	}
 
@@ -156,9 +155,8 @@ func (h *userHandler) List(c *gin.Context) {
 }
 
 func (h *userHandler) SetStatus(c *gin.Context) {
-	actor, ok := actorFromContext(c)
+	actor, ok := requireActorPermission(c, user.PermissionUsersWrite)
 	if !ok {
-		writeFailure(c, http.StatusUnauthorized, Problem{Code: CodeAuthentication, Message: "authentication failed"})
 		return
 	}
 	id, problem := parseUintParam(c, "id")
@@ -185,9 +183,8 @@ func (h *userHandler) SetStatus(c *gin.Context) {
 }
 
 func (h *userHandler) ReplaceRoles(c *gin.Context) {
-	actor, ok := actorFromContext(c)
+	actor, ok := requireActorPermission(c, user.PermissionUsersRoles)
 	if !ok {
-		writeFailure(c, http.StatusUnauthorized, Problem{Code: CodeAuthentication, Message: "authentication failed"})
 		return
 	}
 	id, problem := parseUintParam(c, "id")
@@ -214,6 +211,9 @@ func (h *userHandler) ReplaceRoles(c *gin.Context) {
 }
 
 func (h *userHandler) Permissions(c *gin.Context) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionUsersRead); !ok {
+		return
+	}
 	id, problem := parseUintParam(c, "id")
 	if problem != nil {
 		writeFailure(c, http.StatusBadRequest, *problem)
