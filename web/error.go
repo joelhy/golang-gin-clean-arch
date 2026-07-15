@@ -7,6 +7,7 @@ import (
 
 	"clean-arch-gin/order"
 	"clean-arch-gin/product"
+	"clean-arch-gin/reporting"
 	"clean-arch-gin/user"
 )
 
@@ -19,6 +20,7 @@ func problemFromError(err error) (int, Problem) {
 		userValidation    *user.ValidationError
 		productValidation *product.ValidationError
 		orderValidation   *order.ValidationError
+		statsValidation   *reporting.ValidationError
 	)
 	switch {
 	case errors.As(err, &userValidation):
@@ -27,6 +29,8 @@ func problemFromError(err error) (int, Problem) {
 		return http.StatusBadRequest, validationProblem(productValidation.Field, normalizeValidationReason(err, "invalid"))
 	case errors.As(err, &orderValidation):
 		return http.StatusBadRequest, validationProblem(orderValidation.Field, normalizeValidationReason(err, "invalid"))
+	case errors.As(err, &statsValidation):
+		return http.StatusBadRequest, validationProblem(statsValidation.Field, normalizeValidationReason(err, "invalid"))
 	case isValidationSentinel(err):
 		return http.StatusBadRequest, Problem{
 			Code:    CodeValidation,
@@ -130,5 +134,6 @@ func isValidationSentinel(err error) bool {
 		errors.Is(err, order.ErrInvalidMoney) ||
 		errors.Is(err, order.ErrInvalidCurrency) ||
 		errors.Is(err, order.ErrInvalidStatus) ||
-		errors.Is(err, order.ErrInvalidFilter)
+		errors.Is(err, order.ErrInvalidFilter) ||
+		errors.Is(err, reporting.ErrInvalidRange)
 }

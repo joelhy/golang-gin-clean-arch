@@ -14,6 +14,7 @@ type fakeUserHandlerService struct {
 	meFn           func(context.Context, uint64) (*user.User, error)
 	updateMeFn     func(context.Context, uint64, user.UpdateMeInput) (*user.User, error)
 	listFn         func(context.Context, user.Actor, user.ListFilter) (user.Page, error)
+	adminByIDFn    func(context.Context, user.Actor, uint64) (*user.User, error)
 	setStatusFn    func(context.Context, user.Actor, user.SetStatusInput) error
 	replaceRolesFn func(context.Context, user.Actor, user.ReplaceRolesInput) error
 	permissionsFn  func(context.Context, uint64) ([]string, error)
@@ -29,6 +30,10 @@ func (f fakeUserHandlerService) UpdateMe(ctx context.Context, userID uint64, inp
 
 func (f fakeUserHandlerService) List(ctx context.Context, actor user.Actor, filter user.ListFilter) (user.Page, error) {
 	return f.listFn(ctx, actor, filter)
+}
+
+func (f fakeUserHandlerService) AdminByID(ctx context.Context, actor user.Actor, userID uint64) (*user.User, error) {
+	return f.adminByIDFn(ctx, actor, userID)
 }
 
 func (f fakeUserHandlerService) SetStatus(ctx context.Context, actor user.Actor, input user.SetStatusInput) error {
@@ -155,6 +160,31 @@ func TestUserHandlerAdminListRejectsInvalidQuery(t *testing.T) {
 	assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodeValidation))
 }
 
+func TestUserHandlerAdminByID(t *testing.T) {
+	t.Setenv("GIN_MODE", gin.TestMode)
+
+	handler := NewUserHandler(fakeUserHandlerService{
+		adminByIDFn: func(_ context.Context, actor user.Actor, userID uint64) (*user.User, error) {
+			if actor.UserID != 77 || len(actor.Permissions) != 1 || actor.Permissions[0] != user.PermissionUsersRead {
+				t.Fatalf("actor = %+v", actor)
+			}
+			if userID != 15 {
+				t.Fatalf("userID = %d", userID)
+			}
+			return &user.User{ID: 15, Email: "staff@example.com", Name: "Alice", Status: user.StatusActive, Version: 2}, nil
+		},
+	})
+
+	router := gin.New()
+	router.GET("/api/v1/admin/users/:id", injectIdentity(user.Identity{UserID: 77}), injectPermissions(user.PermissionUsersRead), handler.GetAdmin)
+
+	rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/users/15", nil, nil)
+
+	assertStatusCode(t, rec, http.StatusOK)
+	assertJSONPath(t, rec.Body.Bytes(), "data.id", float64(15))
+	assertJSONPath(t, rec.Body.Bytes(), "data.email", "staff@example.com")
+}
+
 func TestUserHandlerSetStatus(t *testing.T) {
 	t.Setenv("GIN_MODE", gin.TestMode)
 
@@ -263,6 +293,27 @@ func TestUserHandlerAdminRoutesFailClosedWithoutPermissionEvidence(t *testing.T)
 		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
 		if called {
 			t.Fatal("SetStatus must not run without permission evidence")
+		}
+	})
+
+	t.Run("admin_by_id", func(t *testing.T) {
+		called := false
+		handler := NewUserHandler(fakeUserHandlerService{
+			adminByIDFn: func(_ context.Context, _ user.Actor, _ uint64) (*user.User, error) {
+				called = true
+				return &user.User{}, nil
+			},
+		})
+
+		router := gin.New()
+		router.GET("/api/v1/admin/users/:id", injectIdentity(user.Identity{UserID: 77}), handler.GetAdmin)
+
+		rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/users/15", nil, nil)
+
+		assertStatusCode(t, rec, http.StatusForbidden)
+		assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodePermission))
+		if called {
+			t.Fatal("AdminByID must not run without permission evidence")
 		}
 	})
 

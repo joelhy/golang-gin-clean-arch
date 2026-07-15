@@ -14,6 +14,7 @@ type userService interface {
 	Me(context.Context, uint64) (*user.User, error)
 	UpdateMe(context.Context, uint64, user.UpdateMeInput) (*user.User, error)
 	List(context.Context, user.Actor, user.ListFilter) (user.Page, error)
+	AdminByID(context.Context, user.Actor, uint64) (*user.User, error)
 	SetStatus(context.Context, user.Actor, user.SetStatusInput) error
 	ReplaceRoles(context.Context, user.Actor, user.ReplaceRolesInput) error
 	Permissions(context.Context, uint64) ([]string, error)
@@ -152,6 +153,25 @@ func (h *userHandler) List(c *gin.Context) {
 		items = append(items, userToDTO(&page.Items[i]))
 	}
 	writeSuccess(c, http.StatusOK, NewPageData(items, Pagination{Limit: page.Limit, Offset: page.Offset}))
+}
+
+func (h *userHandler) GetAdmin(c *gin.Context) {
+	actor, ok := requireActorPermission(c, user.PermissionUsersRead)
+	if !ok {
+		return
+	}
+	id, problem := parseUintParam(c, "id")
+	if problem != nil {
+		writeFailure(c, http.StatusBadRequest, *problem)
+		return
+	}
+
+	account, err := h.service.AdminByID(c.Request.Context(), actor, id)
+	if err != nil {
+		writeProblem(c, err)
+		return
+	}
+	writeSuccess(c, http.StatusOK, userToDTO(account))
 }
 
 func (h *userHandler) SetStatus(c *gin.Context) {
