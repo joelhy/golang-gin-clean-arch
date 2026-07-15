@@ -138,8 +138,8 @@ func (s *Service) Cancel(ctx context.Context, actor Actor, orderID uint64, expec
 		if order == nil {
 			return nil, fmt.Errorf("cancel order %d: preflight: %w", orderID, ErrNotFound)
 		}
-		// Authorization is checked before entering the transaction so a caller cannot
-		// use persistence timing to probe orders they do not own.
+		// Authorization is checked before entering the write transaction so forbidden
+		// customers cannot force row locks or stock-restoration work for other orders.
 		if order.UserID != actor.UserID {
 			return nil, fmt.Errorf("cancel order %d: %w", orderID, ErrForbidden)
 		}
