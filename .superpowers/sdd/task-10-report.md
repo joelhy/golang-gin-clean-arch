@@ -227,6 +227,78 @@ go vet ./web
 
 - None beyond the existing task-level note about the current rate-limit application code choice.
 
+## Task 10 third re-review fix update
+
+### What changed
+
+- `web/middleware.go`
+  - `MaxBodyBytes` now drains unknown-length request bodies after the handler returns, before any buffered success is committed.
+  - If draining observes `*http.MaxBytesError` and the downstream handler has not already written an error response, the middleware now replaces the buffered success with the standard HTTP `413` JSON failure envelope.
+- `web/middleware_test.go`
+  - Added a regression test for an unknown-length oversized body where the handler never reads the body and still writes success.
+  - Kept the existing ignored-read-error regression so both unknown-length failure shapes are covered.
+
+### RED evidence
+
+Command:
+
+```bash
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+```
+
+Observed failure before the production fix:
+
+```text
+--- FAIL: TestMiddlewareMaxBodyBytesUnknownLengthReturnsEnvelopeWhenHandlerSkipsBodyRead
+    middleware_test.go:253: status = 200, want 413
+```
+
+### GREEN evidence
+
+Command:
+
+```bash
+gofmt -w web/middleware.go web/middleware_test.go && go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+```
+
+Result:
+
+```text
+PASS
+ok  	clean-arch-gin/web	0.013s
+```
+
+### Commands run
+
+```bash
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+gofmt -w web/middleware.go web/middleware_test.go && go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+go test ./web -v
+go vet ./web
+```
+
+### Outputs
+
+- Focused middleware tests: pass after the fix
+- Full `web` package tests: pass
+- `go vet ./web`: exit code `0`
+
+### Files changed in this fix
+
+- `web/middleware.go`
+- `web/middleware_test.go`
+- `.superpowers/sdd/task-10-report.md`
+
+### Self-review
+
+- The fix is scoped to the unknown-length max-body path and does not change the existing content-length fast path.
+- The regression now proves a handler cannot bypass the body limit just by skipping reads and writing a success response.
+- The buffered-success replacement still preserves the existing rule that an already-written error response is not overwritten.
+
+### Concerns
+
+- None.
+
 ## Task 10 second re-review fix update
 
 ### What changed
