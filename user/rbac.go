@@ -40,6 +40,20 @@ func (s *Service) List(ctx context.Context, actor Actor, filter ListFilter) (Pag
 	return clonePage(page), nil
 }
 
+func (s *Service) AdminByID(ctx context.Context, actor Actor, userID uint64) (*User, error) {
+	if err := requirePermission(actor, PermissionUsersRead); err != nil {
+		return nil, fmt.Errorf("get user %d: %w", userID, err)
+	}
+	account, err := s.store.ByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("get user %d: %w", userID, err)
+	}
+	if account == nil {
+		return nil, fmt.Errorf("get user %d: %w", userID, ErrNotFound)
+	}
+	return cloneUser(account), nil
+}
+
 func (s *Service) SetStatus(ctx context.Context, actor Actor, input SetStatusInput) error {
 	if err := requirePermission(actor, PermissionUsersWrite); err != nil {
 		return fmt.Errorf("set user %d status: %w", input.UserID, err)

@@ -150,6 +150,46 @@ func TestServiceListReturnsDeepOwnedPage(t *testing.T) {
 	}
 }
 
+func TestServiceAdminByIDRequiresUsersReadAndReturnsClone(t *testing.T) {
+	store := newFakeStore()
+	store.byIDUser = &User{
+		ID: 7, Email: "admin@example.com", Name: "Admin", Status: StatusActive,
+		Roles: []Role{{Name: RoleAdmin, Permissions: []Permission{{Name: PermissionUsersRead}}}},
+	}
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
+
+	got, err := service.AdminByID(t.Context(), Actor{UserID: 9, Permissions: []string{PermissionUsersRead}}, 7)
+	if err != nil {
+		t.Fatalf("AdminByID() error = %v", err)
+	}
+	if store.byIDCalls != 1 {
+		t.Fatalf("ByID() calls = %d, want 1", store.byIDCalls)
+	}
+	got.Name = "mutated"
+	got.Roles[0].Name = RoleCustomer
+	if store.byIDUser.Name != "Admin" || store.byIDUser.Roles[0].Name != RoleAdmin {
+		t.Fatalf("AdminByID() exposed mutable backing data: %+v", store.byIDUser)
+	}
+}
+
+func TestServiceAdminByIDFailsClosed(t *testing.T) {
+	store := newFakeStore()
+	store.byIDUser = &User{ID: 7, Email: "admin@example.com", Name: "Admin", Status: StatusActive}
+	service := newTestService(t, store, &fakePasswords{}, fakeClock{now: fixedTime})
+
+	if _, err := service.AdminByID(t.Context(), Actor{Permissions: []string{"users"}}, 7); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("AdminByID() error = %v, want ErrForbidden", err)
+	}
+	if store.byIDCalls != 0 {
+		t.Fatalf("ByID() calls = %d, want 0", store.byIDCalls)
+	}
+
+	store.byIDUser = nil
+	if _, err := service.AdminByID(t.Context(), Actor{Permissions: []string{PermissionUsersRead}}, 404); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("AdminByID() error = %v, want ErrNotFound", err)
+	}
+}
+
 func TestServiceListFailsClosed(t *testing.T) {
 	t.Run("forbidden", func(t *testing.T) {
 		store := newFakeStore()
