@@ -152,3 +152,77 @@ ok      clean-arch-gin/web  0.009s
 ## Concerns
 
 - There is no dedicated rate-limit application code in the Task 10 brief constant set, so the login throttle currently uses HTTP `429` with `CodeAuthentication` and message `too many login attempts`. This behavior is covered by tests, but if Task 11/12 want a distinct application code, that will need a follow-up change.
+
+## Task 10 review fix update
+
+### What changed
+
+- `web/middleware.go`
+  - CORS disallowed preflight now writes the standard JSON failure envelope instead of a bare `403`.
+  - Context cancellation now writes the standard JSON failure envelope instead of a bare `499`.
+  - Existing status/code choices were preserved; only the response shape changed.
+- `web/middleware_test.go`
+  - Added envelope assertions for disallowed preflight, canceled context, max-body rejection, and rate limiting.
+  - The helper checks `code`, `message`, and the absence of forbidden keys such as `success`, `meta`, `details`, and `request_id`.
+
+### RED evidence
+
+Command:
+
+```bash
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+```
+
+Observed failures before the middleware fix:
+
+```text
+--- FAIL: TestCORSRejectsDisallowedPreflight
+    middleware_test.go:148: unmarshal body: unexpected end of JSON input; body=""
+--- FAIL: TestMiddlewareCanceledContextReturns499
+    middleware_test.go:269: unmarshal body: unexpected end of JSON input; body=""
+```
+
+### GREEN evidence
+
+Command:
+
+```bash
+gofmt -w web/middleware.go web/middleware_test.go && go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+```
+
+Result:
+
+```text
+PASS
+ok  	clean-arch-gin/web	0.017s
+```
+
+### Commands run
+
+```bash
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+go test ./web -v
+go vet ./web
+```
+
+### Outputs
+
+- Focused middleware tests: pass
+- Full `web` package tests: pass
+- `go vet ./web`: exit code `0`
+
+### Files changed in this fix
+
+- `web/middleware.go`
+- `web/middleware_test.go`
+- `.superpowers/sdd/task-10-report.md`
+
+### Self-review
+
+- The fix is minimal and local to middleware behavior.
+- The response envelope contract is now enforced by tests for every middleware-generated failure path covered in Task 10.
+- No new rate-limit application code was introduced.
+
+### Concerns
+
+- None beyond the existing task-level note about the current rate-limit application code choice.

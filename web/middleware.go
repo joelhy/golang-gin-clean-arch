@@ -124,7 +124,11 @@ func CORS(opts CORSOptions) gin.HandlerFunc {
 		isPreflight := c.Request.Method == http.MethodOptions && c.GetHeader("Access-Control-Request-Method") != ""
 		if !originAllowed {
 			if isPreflight {
-				c.AbortWithStatus(http.StatusForbidden)
+				// Preflight denial still needs the same JSON envelope as other middleware errors so clients can handle it uniformly.
+				writeFailure(c, http.StatusForbidden, Problem{
+					Code:    CodePermission,
+					Message: "origin not allowed",
+				})
 				return
 			}
 			c.Next()
@@ -179,7 +183,11 @@ func ContextCancellation() gin.HandlerFunc {
 			return
 		}
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			c.AbortWithStatus(499)
+			// A canceled request is a transport-level abort, but the client still needs the standard failure envelope.
+			writeFailure(c, 499, Problem{
+				Code:    CodeInternal,
+				Message: "request canceled",
+			})
 		}
 	}
 }

@@ -145,6 +145,7 @@ func TestCORSRejectsDisallowedPreflight(t *testing.T) {
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusForbidden)
 	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
 func TestMiddlewareTrustedProxiesSupport(t *testing.T) {
@@ -185,6 +186,7 @@ func TestMiddlewareMaxBodyBytes(t *testing.T) {
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
 	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
 func TestRateLimitByIPAndAccount(t *testing.T) {
@@ -227,6 +229,7 @@ func TestRateLimitByIPAndAccount(t *testing.T) {
 	if rec2.Code != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, want %d", rec2.Code, http.StatusTooManyRequests)
 	}
+	assertEnvelopeFailure(t, rec2.Body.Bytes())
 }
 
 func TestRateLimitCleanupStopsOnContextCancellation(t *testing.T) {
@@ -263,9 +266,33 @@ func TestMiddlewareCanceledContextReturns499(t *testing.T) {
 	if rec.Code != 499 {
 		t.Fatalf("status = %d, want 499", rec.Code)
 	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
 func testLogger() (*slog.Logger, *bytes.Buffer) {
 	var buf bytes.Buffer
 	return slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})), &buf
+}
+
+func assertEnvelopeFailure(t *testing.T, body []byte) {
+	t.Helper()
+
+	var got map[string]any
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("unmarshal body: %v; body=%q", err, string(body))
+	}
+	if got["code"] == nil {
+		t.Fatalf("body missing code field: %#v", got)
+	}
+	if code, ok := got["code"].(float64); !ok || code == 0 {
+		t.Fatalf("code = %#v, want nonzero integer", got["code"])
+	}
+	if message, ok := got["message"].(string); !ok || strings.TrimSpace(message) == "" {
+		t.Fatalf("message = %#v, want nonempty string", got["message"])
+	}
+	for _, forbidden := range []string{"success", "meta", "details", "request_id"} {
+		if _, ok := got[forbidden]; ok {
+			t.Fatalf("body contains forbidden key %q: %#v", forbidden, got)
+		}
+	}
 }
