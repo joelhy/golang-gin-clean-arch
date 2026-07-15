@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -43,8 +42,8 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 	if err != nil {
 		return nil, fmt.Errorf("create order: %w", err)
 	}
-	if strings.TrimSpace(input.IdempotencyKey) == "" {
-		return nil, fmt.Errorf("create order: %w", &ValidationError{Field: "idempotency_key", Message: "must not be empty", Err: ErrInvalidOrder})
+	if err := ValidateIdempotencyKey(input.IdempotencyKey); err != nil {
+		return nil, fmt.Errorf("create order: %w", err)
 	}
 
 	requestHash, err := canonicalRequestHash(items)
@@ -57,7 +56,7 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 		claim, err := tx.ClaimIdempotency(ctx, IdempotencyClaim{
 			UserID:      userID,
 			Operation:   OperationCheckout,
-			Key:         strings.TrimSpace(input.IdempotencyKey),
+			Key:         input.IdempotencyKey,
 			RequestHash: requestHash,
 			CreatedAt:   now,
 		})
@@ -93,7 +92,7 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 		if err := tx.CompleteIdempotency(ctx, IdempotencyCompletion{
 			UserID:    userID,
 			Operation: OperationCheckout,
-			Key:       strings.TrimSpace(input.IdempotencyKey),
+			Key:       input.IdempotencyKey,
 			OrderID:   order.ID,
 			UpdatedAt: now,
 		}); err != nil {
@@ -268,6 +267,21 @@ func (s *Service) advance(
 		return nil, fmt.Errorf("%s order %d: %w", action, orderID, err)
 	}
 	return updated, nil
+}
+
+// ValidateIdempotencyKey keeps the checkout contract identical across HTTP and
+// any other service caller so storage never normalizes a key differently than
+// the transport that accepted it.
+func ValidateIdempotencyKey(key string) error {
+	if len(key) < 1 || len(key) > 128 {
+		return &ValidationError{Field: "idempotency_key", Message: "must be between 1 and 128 characters", Err: ErrInvalidOrder}
+	}
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
+			return &ValidationError{Field: "idempotency_key", Message: "must contain only visible ASCII characters", Err: ErrInvalidOrder}
+		}
+	}
+	return nil
 }
 
 func (o *Order) Confirm(now time.Time) error {

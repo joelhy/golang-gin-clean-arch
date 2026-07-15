@@ -74,6 +74,47 @@ func TestOrderHandlerCreateRequiresIdempotencyKey(t *testing.T) {
 	}
 }
 
+func TestOrderHandlerCreateRejectsNonVisibleIdempotencyKey(t *testing.T) {
+	t.Setenv("GIN_MODE", gin.TestMode)
+
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{name: "leading and trailing spaces", header: " checkout-1 "},
+		{name: "tab", header: "checkout\t1"},
+		{name: "control", header: "checkout-\x7f"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			called := false
+			handler := NewOrderHandler(fakeOrderHandlerService{
+				createFn: func(_ context.Context, _ uint64, _ order.CreateInput) (*order.Order, error) {
+					called = true
+					return nil, nil
+				},
+			})
+
+			router := gin.New()
+			router.POST("/api/v1/orders", injectIdentity(user.Identity{UserID: 7}), handler.Create)
+
+			rec := performRequest(t, router, http.MethodPost, "/api/v1/orders", bytes.NewBufferString(`{"items":[{"product_id":9,"quantity":2}]}`), map[string][]string{
+				"Content-Type":    {"application/json"},
+				"Idempotency-Key": {tt.header},
+			})
+
+			assertStatusCode(t, rec, http.StatusBadRequest)
+			assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodeValidation))
+			assertJSONPath(t, rec.Body.Bytes(), "data.0.field", "idempotency_key")
+			assertJSONPath(t, rec.Body.Bytes(), "data.0.reason", "invalid_character")
+			if called {
+				t.Fatal("Create must not run with a non-visible Idempotency-Key header")
+			}
+		})
+	}
+}
+
 func TestOrderHandlerCreateSupportsReplayAndConflict(t *testing.T) {
 	t.Setenv("GIN_MODE", gin.TestMode)
 
@@ -185,7 +226,7 @@ func TestOrderHandlerAdminListAndTransitionsRequirePermissionEvidence(t *testing
 			if actor.UserID != 77 || !actor.Admin {
 				t.Fatalf("actor = %+v", actor)
 			}
-			if filter.UserID != 0 || len(filter.Statuses) != 2 || filter.Statuses[0] != order.StatusPending || filter.Statuses[1] != order.StatusConfirmed {
+			if filter.UserID != 9 || len(filter.Statuses) != 2 || filter.Statuses[0] != order.StatusPending || filter.Statuses[1] != order.StatusConfirmed {
 				t.Fatalf("filter = %+v", filter)
 			}
 			if filter.MinTotalAmount == nil || *filter.MinTotalAmount != 1000 || filter.MaxTotalAmount == nil || *filter.MaxTotalAmount != 5000 {
@@ -229,7 +270,7 @@ func TestOrderHandlerAdminListAndTransitionsRequirePermissionEvidence(t *testing
 	router.POST("/api/v1/admin/orders/:id/deliver", injectIdentity(user.Identity{UserID: 77}), injectPermissions(user.PermissionOrdersManage), handler.Deliver)
 	router.POST("/api/v1/admin/orders/:id/cancel", injectIdentity(user.Identity{UserID: 77}), injectPermissions(user.PermissionOrdersManage), handler.CancelAdmin)
 
-	listRec := performRequest(t, router, http.MethodGet, "/api/v1/admin/orders?status=pending&status=confirmed&created_from=2026-07-15T00:00:00Z&created_to=2026-07-16T00:00:00Z&min_total_amount=1000&max_total_amount=5000&sort=total&direction=desc&limit=5&offset=10", nil, nil)
+	listRec := performRequest(t, router, http.MethodGet, "/api/v1/admin/orders?user_id=9&status=pending&status=confirmed&created_from=2026-07-15T00:00:00Z&created_to=2026-07-16T00:00:00Z&min_total_amount=1000&max_total_amount=5000&sort=total&direction=desc&limit=5&offset=10", nil, nil)
 	confirmRec := performJSON(t, router, http.MethodPost, "/api/v1/admin/orders/51/confirm", `{"version":2}`)
 	shipRec := performJSON(t, router, http.MethodPost, "/api/v1/admin/orders/51/ship", `{"version":3}`)
 	deliverRec := performJSON(t, router, http.MethodPost, "/api/v1/admin/orders/51/deliver", `{"version":4}`)
@@ -245,6 +286,30 @@ func TestOrderHandlerAdminListAndTransitionsRequirePermissionEvidence(t *testing
 	assertJSONPath(t, shipRec.Body.Bytes(), "data.status", "shipped")
 	assertJSONPath(t, deliverRec.Body.Bytes(), "data.status", "delivered")
 	assertJSONPath(t, cancelRec.Body.Bytes(), "data.status", "cancelled")
+}
+
+func TestOrderHandlerAdminListRejectsNonPositiveUserID(t *testing.T) {
+	t.Setenv("GIN_MODE", gin.TestMode)
+
+	called := false
+	handler := NewOrderHandler(fakeOrderHandlerService{
+		listFn: func(_ context.Context, _ order.Actor, _ order.ListFilter) (order.Page, error) {
+			called = true
+			return order.Page{}, nil
+		},
+	})
+
+	router := gin.New()
+	router.GET("/api/v1/admin/orders", injectIdentity(user.Identity{UserID: 77}), injectPermissions(user.PermissionOrdersReadAll), handler.ListAdmin)
+
+	rec := performRequest(t, router, http.MethodGet, "/api/v1/admin/orders?user_id=0", nil, nil)
+
+	assertStatusCode(t, rec, http.StatusBadRequest)
+	assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodeValidation))
+	assertJSONPath(t, rec.Body.Bytes(), "data.0.field", "user_id")
+	if called {
+		t.Fatal("ListAdmin must not run when user_id is not a positive integer")
+	}
 }
 
 func TestOrderHandlerAdminRoutesFailClosedWithoutPermissionEvidence(t *testing.T) {
