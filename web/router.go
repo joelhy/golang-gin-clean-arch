@@ -68,6 +68,9 @@ func NewRouter(ctx context.Context, deps Dependencies) (*gin.Engine, error) {
 	router.Use(RequestID())
 	router.Use(Recovery(logger))
 	router.Use(SecurityHeaders())
+	if deps.Config.HTTP.MaxBodyBytes > 0 {
+		router.Use(MaxBodyBytes(deps.Config.HTTP.MaxBodyBytes))
+	}
 	router.Use(CORS(CORSOptions{
 		AllowedOrigins:   deps.Config.CORS.AllowedOrigins,
 		AllowCredentials: deps.Config.CORS.AllowCredentials,

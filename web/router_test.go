@@ -1,6 +1,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -197,6 +198,32 @@ func TestRouterRegistersApprovedRoutesOnly(t *testing.T) {
 			}
 		}
 	}
+}
+
+func TestRouterAppliesConfiguredMaxBodyBytes(t *testing.T) {
+	router, err := NewRouter(context.Background(), Dependencies{
+		Auth:     fakeRouterAuthService{},
+		Users:    fakeRouterUserService{},
+		Products: fakeRouterProductService{},
+		Orders:   fakeRouterOrderService{},
+		Stats:    fakeRouterStatsService{},
+		Logger:   slog.Default(),
+		Config: config.Config{
+			HTTP:      config.HTTP{MaxBodyBytes: 8},
+			CORS:      config.CORS{},
+			RateLimit: config.RateLimit{LoginRequestsPerSecond: 10, LoginBurst: 10},
+		},
+	})
+	if err != nil {
+		t.Fatalf("NewRouter() error = %v", err)
+	}
+
+	rec := performRequest(t, router, http.MethodPost, "/api/v1/auth/register", bytes.NewBufferString(`{"email":"user@example.com"}`), map[string][]string{
+		"Content-Type": {"application/json"},
+	})
+
+	assertStatusCode(t, rec, http.StatusRequestEntityTooLarge)
+	assertJSONPath(t, rec.Body.Bytes(), "code", float64(CodeMalformedJSON))
 }
 
 func TestHealthEndpointsAndErrorEnvelopes(t *testing.T) {
