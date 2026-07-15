@@ -226,3 +226,76 @@ go vet ./web
 ### Concerns
 
 - None beyond the existing task-level note about the current rate-limit application code choice.
+
+## Task 10 second re-review fix update
+
+### What changed
+
+- `web/middleware.go`
+  - Moved `AccessLog` earlier in `UseStandard` so it wraps later middleware and records middleware-generated failures after their final status is known.
+  - Left `ContextCancellation` inside that logging wrapper so canceled requests are logged with the final `499` envelope instead of the default status.
+  - Added tracked max-body reads plus a buffered response writer for unknown-length/chunked bodies so an ignored `*http.MaxBytesError` cannot escape as a success response.
+- `web/middleware_test.go`
+  - Added focused regressions for denied preflight logging with final `403`, canceled request logging with final `499`, and unknown-length oversized body rejection even when the handler ignores the read error.
+  - Reused the Task 10 envelope assertions so each middleware-generated failure still has nonzero `code`, nonempty `message`, and no forbidden keys.
+
+### RED evidence
+
+Command:
+
+```bash
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+```
+
+Observed failures before the production fix:
+
+```text
+--- FAIL: TestMiddlewareLogsDeniedPreflightWithFinal403
+    middleware_test.go:175: logs = "", want substring "status=403"
+--- FAIL: TestMiddlewareMaxBodyBytesUnknownLengthReturnsEnvelopeWhenHandlerIgnoresReadError
+    middleware_test.go:234: status = 200, want 413
+--- FAIL: TestMiddlewareLogsCanceledRequestWithFinal499
+    middleware_test.go:340: logs = "... status=200 ...", want substring "status=499"
+FAIL
+```
+
+### GREEN evidence
+
+Commands:
+
+```bash
+gofmt -w web/middleware.go web/middleware_test.go
+go test ./web -run 'TestMiddleware|TestCORS|TestRate' -v
+go test ./web -v
+go vet ./web
+```
+
+Results:
+
+```text
+PASS
+ok  	clean-arch-gin/web	0.012s
+```
+
+```text
+PASS
+ok  	clean-arch-gin/web	0.014s
+```
+
+`go vet ./web`: exit code `0`, no findings.
+
+### Files changed in this fix
+
+- `web/middleware.go`
+- `web/middleware_test.go`
+- `.superpowers/sdd/task-10-report.md`
+
+### Self-review
+
+- `AccessLog` now observes middleware aborts and post-handler cancellation rewriting through the standard stack instead of logging an intermediate status.
+- The streamed max-body guard is scoped to unknown-length requests, which keeps the fix local to the reviewer-identified gap and avoids changing the fixed-length fast path.
+- Buffered response handling preserves headers already set by outer middleware, so request ID and security headers remain intact on the chunked overflow path.
+
+### Concerns
+
+- No unrelated workspace edits were present in the files this fix touched.
