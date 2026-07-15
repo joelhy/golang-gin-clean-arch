@@ -1,44 +1,72 @@
-version: '3.8'
-
 services:
-  # MySQL Database
   mysql:
-    image: mysql:8.0
-    container_name: clean-arch-mysql
+    image: mysql:8.4
     environment:
-      MYSQL_ROOT_PASSWORD: rootpassword
-      MYSQL_DATABASE: clean_arch_db
-      MYSQL_USER: appuser
-      MYSQL_PASSWORD: apppassword
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${APP_DB_NAME:-clean_arch}
+      MYSQL_USER: ${APP_DB_USER:-app}
+      MYSQL_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
     ports:
-      - "3306:3306"
+      - "${MYSQL_PORT:-3306}:3306"
     volumes:
       - mysql_data:/var/lib/mysql
-      - ./migrations:/docker-entrypoint-initdb.d
-    restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      timeout: 20s
-      retries: 10
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u$${MYSQL_USER} -p$${MYSQL_PASSWORD} --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+    restart: unless-stopped
 
-  # Go Application
-  app:
-    build: .
-    container_name: clean-arch-app
+  migrate:
+    build:
+      context: .
+      target: admin
+      args:
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25-alpine}
+        ALPINE_IMAGE: ${ALPINE_IMAGE:-alpine:3.22}
+    command: ["migrate", "up"]
     environment:
-      DB_HOST: mysql
-      DB_PORT: 3306
-      DB_USER: appuser
-      DB_PASSWORD: apppassword
-      DB_NAME: clean_arch_db
-      SERVER_PORT: 8080
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      APP_HTTP_ADDRESS: ":8080"
+      APP_DB_HOST: mysql
+      APP_DB_PORT: "3306"
+      APP_DB_USER: ${APP_DB_USER:-app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+      APP_DB_NAME: ${APP_DB_NAME:-clean_arch}
+      APP_JWT_KEY: ${APP_JWT_KEY:?set APP_JWT_KEY}
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:3000}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    profiles: ["tools"]
+    restart: "no"
+
+  app:
+    build:
+      context: .
+      target: server
+      args:
+        GO_IMAGE: ${GO_IMAGE:-golang:1.25-alpine}
+        ALPINE_IMAGE: ${ALPINE_IMAGE:-alpine:3.22}
+    environment:
+      APP_ENVIRONMENT: ${APP_ENVIRONMENT:-development}
+      APP_HTTP_ADDRESS: ":8080"
+      APP_DB_HOST: mysql
+      APP_DB_PORT: "3306"
+      APP_DB_USER: ${APP_DB_USER:-app}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?set APP_DB_PASSWORD}
+      APP_DB_NAME: ${APP_DB_NAME:-clean_arch}
+      APP_JWT_KEY: ${APP_JWT_KEY:?set APP_JWT_KEY}
+      APP_JWT_ISSUER: ${APP_JWT_ISSUER:-clean-arch-gin}
+      APP_JWT_AUDIENCE: ${APP_JWT_AUDIENCE:-clean-arch-api}
+      APP_CORS_ALLOWED_ORIGINS: ${APP_CORS_ALLOWED_ORIGINS:-http://localhost:3000}
       GIN_MODE: release
     ports:
-      - "8080:8080"
+      - "${APP_PORT:-8080}:8080"
     depends_on:
       mysql:
         condition: service_healthy
     restart: unless-stopped
 
 volumes:
-  mysql_data: 
+  mysql_data:
