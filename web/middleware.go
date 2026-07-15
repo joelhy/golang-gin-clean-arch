@@ -146,7 +146,7 @@ func CORS(opts CORSOptions) gin.HandlerFunc {
 
 		if isPreflight {
 			headers.Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-			headers.Set("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Request-ID")
+			headers.Set("Access-Control-Allow-Headers", "Authorization,Content-Type,Idempotency-Key,X-Request-ID")
 			headers.Set("Access-Control-Max-Age", "600")
 			c.AbortWithStatus(http.StatusNoContent)
 			return

@@ -304,6 +304,37 @@ func TestCreateRejectsZeroQuantity(t *testing.T) {
 	}
 }
 
+func TestServiceCreateRejectsNonVisibleIdempotencyKey(t *testing.T) {
+	tests := []struct {
+		name string
+		key  string
+	}{
+		{name: "leading and trailing spaces", key: " checkout-1 "},
+		{name: "tab", key: "checkout\t1"},
+		{name: "control", key: "checkout-\x7f"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tx := &fakeTx{products: map[uint64]SellableProduct{
+				1: {ID: 1, SKU: "A", Name: "A", UnitPrice: Money{Amount: 100, Currency: "USD"}, Stock: 1},
+			}}
+			svc := newTestService(t, fakeTransactor{tx: tx}, &fakeReader{}, fakeClock{now: fixedTime}, fakeNumbers{})
+
+			_, err := svc.Create(t.Context(), 7, CreateInput{
+				IdempotencyKey: tt.key,
+				Items:          []RequestedItem{{ProductID: 1, Quantity: 1}},
+			})
+			if !errors.Is(err, ErrInvalidOrder) {
+				t.Fatalf("Create() error = %v, want errors.Is(_, %v)", err, ErrInvalidOrder)
+			}
+			if tx.claimInput.Key != "" {
+				t.Fatalf("ClaimIdempotency() key = %q, want validation to stop before transaction", tx.claimInput.Key)
+			}
+		})
+	}
+}
+
 func TestCreateRejectsMixedCurrencies(t *testing.T) {
 	tx := &fakeTx{products: map[uint64]SellableProduct{
 		1: {ID: 1, SKU: "A", Name: "A", UnitPrice: Money{Amount: 100, Currency: "USD"}, Stock: 1},

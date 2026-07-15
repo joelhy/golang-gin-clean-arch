@@ -149,6 +149,28 @@ func TestCORSRejectsDisallowedPreflight(t *testing.T) {
 	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
+func TestCORSPreflightAllowsIdempotencyKeyHeader(t *testing.T) {
+	engine := gin.New()
+	engine.Use(CORS(CORSOptions{AllowedOrigins: []string{"https://app.example.com"}}))
+	engine.POST("/api/v1/orders", func(c *gin.Context) {
+		c.Status(http.StatusCreated)
+	})
+
+	req := httptest.NewRequest(http.MethodOptions, "/api/v1/orders", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	req.Header.Set("Access-Control-Request-Headers", "content-type,idempotency-key")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+	if got := rec.Header().Get("Access-Control-Allow-Headers"); !strings.Contains(got, "Idempotency-Key") {
+		t.Fatalf("allow headers = %q, want Idempotency-Key", got)
+	}
+}
+
 func TestMiddlewareLogsDeniedPreflightWithFinal403(t *testing.T) {
 	logger, logBuffer := testLogger()
 

@@ -244,13 +244,13 @@ func parseIdempotencyKey(c *gin.Context) (string, *Problem) {
 		problem := validationProblem("idempotency_key", "required")
 		return "", &problem
 	}
-	key := strings.TrimSpace(values[0])
+	key := values[0]
 	if len(key) < 1 || len(key) > 128 {
 		problem := validationProblem("idempotency_key", "invalid_length")
 		return "", &problem
 	}
-	for _, r := range key {
-		if r < 0x21 || r > 0x7e {
+	for i := 0; i < len(key); i++ {
+		if key[i] < 0x21 || key[i] > 0x7e {
 			problem := validationProblem("idempotency_key", "invalid_character")
 			return "", &problem
 		}
@@ -298,6 +298,14 @@ func decodeOrderFilter(values url.Values) (order.ListFilter, *Problem) {
 		filter.MaxTotalAmount = &max
 	}
 
+	userID, ok, problem := singletonPositiveUint64(values, "user_id")
+	if problem != nil {
+		return order.ListFilter{}, problem
+	}
+	if ok {
+		filter.UserID = userID
+	}
+
 	return filter, nil
 }
 
@@ -308,6 +316,19 @@ func singletonInt64(values url.Values, key string) (int64, bool, *Problem) {
 	}
 	value, err := strconv.ParseInt(raw, 10, 64)
 	if err != nil {
+		problem := validationProblem(key, "invalid_integer")
+		return 0, false, &problem
+	}
+	return value, true, nil
+}
+
+func singletonPositiveUint64(values url.Values, key string) (uint64, bool, *Problem) {
+	raw, ok, problem := singletonString(values, key)
+	if !ok || problem != nil {
+		return 0, ok, problem
+	}
+	value, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil || value == 0 {
 		problem := validationProblem(key, "invalid_integer")
 		return 0, false, &problem
 	}
