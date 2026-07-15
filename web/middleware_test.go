@@ -236,6 +236,25 @@ func TestMiddlewareMaxBodyBytesUnknownLengthReturnsEnvelopeWhenHandlerIgnoresRea
 	assertEnvelopeFailure(t, rec.Body.Bytes())
 }
 
+func TestMiddlewareMaxBodyBytesUnknownLengthReturnsEnvelopeWhenHandlerSkipsBodyRead(t *testing.T) {
+	engine := gin.New()
+	engine.Use(MaxBodyBytes(8))
+	engine.POST("/", func(c *gin.Context) {
+		// The middleware has to police unknown-length bodies even when handlers never touch the payload.
+		writeSuccess(c, http.StatusOK, gin.H{"accepted": true})
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewBufferString(`{"name":"alice"}`))
+	req.ContentLength = -1
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusRequestEntityTooLarge)
+	}
+	assertEnvelopeFailure(t, rec.Body.Bytes())
+}
+
 func TestRateLimitByIPAndAccount(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

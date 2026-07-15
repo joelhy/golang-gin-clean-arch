@@ -187,6 +187,9 @@ func MaxBodyBytes(limit int64) gin.HandlerFunc {
 		c.Writer = originalWriter
 
 		if c.Request.ContentLength < 0 {
+			// Drain after the handler returns so chunked or otherwise unknown-length bodies still trip the
+			// max-bytes sentinel even when downstream code never read the payload at all.
+			_, _ = io.Copy(io.Discard, body)
 			if body.exceededLimit() && (!bufferedWriter.Written() || bufferedWriter.Status() < http.StatusBadRequest) {
 				writeFailure(c, http.StatusRequestEntityTooLarge, Problem{
 					Code:    CodeMalformedJSON,
