@@ -249,8 +249,8 @@ func TestCheckoutSortsLocksAndUsesServerPrices(t *testing.T) {
 		t.Fatalf("Create() number = %q, want %q", got.Number, "ORD-20260714-LOCKS")
 	}
 	if diff := cmp.Diff([]StockChange{
-		{ProductID: 1, Delta: -2},
-		{ProductID: 2, Delta: -1},
+		{ProductID: 1, Delta: -2, ActorUserID: 7},
+		{ProductID: 2, Delta: -1, ActorUserID: 7},
 	}, tx.decreased); diff != "" {
 		t.Fatalf("DecreaseStock() mismatch (-want +got):\n%s", diff)
 	}
@@ -448,8 +448,8 @@ func TestServiceCancelEnforcesPermissionsAndRestoresInventory(t *testing.T) {
 			t.Fatalf("Cancel() status = %q, want %q", got.Status, StatusCancelled)
 		}
 		if diff := cmp.Diff([]StockChange{
-			{ProductID: 1, Delta: 2},
-			{ProductID: 2, Delta: 1},
+			{ProductID: 1, Delta: 2, ActorUserID: 7},
+			{ProductID: 2, Delta: 1, ActorUserID: 7},
 		}, tx.increased); diff != "" {
 			t.Fatalf("IncreaseStock() mismatch (-want +got):\n%s", diff)
 		}
@@ -478,6 +478,12 @@ func TestServiceCancelEnforcesPermissionsAndRestoresInventory(t *testing.T) {
 		}
 		if got.Status != StatusCancelled {
 			t.Fatalf("Cancel() status = %q, want %q", got.Status, StatusCancelled)
+		}
+		if diff := cmp.Diff([]StockChange{
+			{ProductID: 1, Delta: 2, ActorUserID: 99},
+			{ProductID: 2, Delta: 1, ActorUserID: 99},
+		}, tx.increased); diff != "" {
+			t.Fatalf("IncreaseStock() mismatch (-want +got):\n%s", diff)
 		}
 	})
 }

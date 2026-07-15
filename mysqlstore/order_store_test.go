@@ -338,6 +338,7 @@ func TestOrderStore(t *testing.T) {
 		db := newTestDB(t)
 		svc := newOrderService(t, db, fixedOrderClock{}, &sequenceNumbers{values: []string{"ORD-CANCEL-1"}})
 		customer := createStoredUser(t, mustUserStore(t, db), "order-cancel@example.com", user.RoleCustomer)
+		admin := createStoredUser(t, mustUserStore(t, db), "order-cancel-admin@example.com", user.RoleAdmin)
 		store := mustProductStore(t, db)
 		now := time.Date(2026, 7, 15, 10, 30, 0, 0, time.UTC)
 
@@ -374,7 +375,7 @@ func TestOrderStore(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create() error = %v", err)
 		}
-		cancelled, err := svc.Cancel(t.Context(), order.Actor{UserID: customer.ID}, created.ID, created.Version)
+		cancelled, err := svc.Cancel(t.Context(), order.Actor{UserID: admin.ID, Admin: true}, created.ID, created.Version)
 		if err != nil {
 			t.Fatalf("Cancel() error = %v", err)
 		}
@@ -385,6 +386,8 @@ func TestOrderStore(t *testing.T) {
 		assertStocks(t, db, map[uint64]uint32{first.ID: 3, second.ID: 2})
 		assertStockAdjustmentCount(t, db, first.ID, 2)
 		assertStockAdjustmentCount(t, db, second.ID, 2)
+		assertLatestStockAdjustmentActor(t, db, first.ID, admin.ID)
+		assertLatestStockAdjustmentActor(t, db, second.ID, admin.ID)
 		assertOrderStatusVersion(t, db, created.ID, order.StatusCancelled, created.Version+1)
 	})
 
@@ -653,6 +656,21 @@ func assertStockAdjustmentCount(t *testing.T, db *gorm.DB, productID uint64, wan
 	}
 	if count != want {
 		t.Fatalf("product %d stock adjustments = %d, want %d", productID, count, want)
+	}
+}
+
+func assertLatestStockAdjustmentActor(t *testing.T, db *gorm.DB, productID uint64, want uint64) {
+	t.Helper()
+	q := query.Use(db)
+	row, err := q.StockAdjustment.WithContext(t.Context()).
+		Where(q.StockAdjustment.ProductID.Eq(productID)).
+		Order(q.StockAdjustment.ID.Desc()).
+		First()
+	if err != nil {
+		t.Fatalf("load latest stock adjustment for product %d: %v", productID, err)
+	}
+	if row.ActorUserID != want {
+		t.Fatalf("product %d latest stock adjustment actor_user_id = %d, want %d", productID, row.ActorUserID, want)
 	}
 }
 

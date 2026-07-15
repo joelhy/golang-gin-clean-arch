@@ -67,8 +67,9 @@ type SellableProduct struct {
 }
 
 type StockChange struct {
-	ProductID uint64
-	Delta     int64
+	ProductID   uint64
+	Delta       int64
+	ActorUserID uint64
 }
 
 type Page struct {
