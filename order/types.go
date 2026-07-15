@@ -119,6 +119,7 @@ func (f ListFilter) Validate() error {
 
 type IdempotencyClaim struct {
 	UserID      uint64
+	Operation   string
 	Key         string
 	RequestHash [32]byte
 	CreatedAt   time.Time
@@ -139,6 +140,7 @@ type IdempotencyResult struct {
 
 type IdempotencyCompletion struct {
 	UserID    uint64
+	Operation string
 	Key       string
 	OrderID   uint64
 	UpdatedAt time.Time

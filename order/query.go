@@ -30,6 +30,11 @@ func (s *Service) List(ctx context.Context, actor Actor, filter ListFilter) (Pag
 	if err := filter.Validate(); err != nil {
 		return Page{}, fmt.Errorf("list orders: %w", err)
 	}
+	if filter.Sort == "" {
+		// Readers should always receive an explicit default sort so the list
+		// contract stays stable even when callers omit an order-by preference.
+		filter.Sort = "created_at"
+	}
 	page, err := s.reader.List(ctx, filter)
 	if err != nil {
 		return Page{}, fmt.Errorf("list orders: %w", err)
