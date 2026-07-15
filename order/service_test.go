@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -611,6 +612,34 @@ func TestCreatePersistsIdempotencyHash(t *testing.T) {
 	}
 	if diff := cmp.Diff(wantHash[:], tx.claimInput.RequestHash[:]); diff != "" {
 		t.Fatalf("ClaimIdempotency() request hash mismatch (-want +got):\n%s", diff)
+	}
+}
+
+func TestCreateUsesCheckoutOperationForIdempotencyClaimAndCompletion(t *testing.T) {
+	tx := &fakeTx{products: map[uint64]SellableProduct{
+		1: {ID: 1, SKU: "A", Name: "A", UnitPrice: Money{Amount: 100, Currency: "USD"}, Stock: 3},
+	}}
+	svc := newTestService(t, fakeTransactor{tx: tx}, &fakeReader{}, fakeClock{now: fixedTime}, fakeNumbers{})
+
+	_, err := svc.Create(t.Context(), 7, CreateInput{
+		IdempotencyKey: "checkout-operation",
+		Items:          []RequestedItem{{ProductID: 1, Quantity: 1}},
+	})
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+
+	// The idempotency key is scoped by operation so checkout cannot collide with
+	// other consumer actions that reuse the same key for the same user.
+	if got := reflect.ValueOf(tx.claimInput).FieldByName("Operation"); !got.IsValid() {
+		t.Fatal("ClaimIdempotency() claim is missing Operation")
+	} else if got.String() != "checkout" {
+		t.Fatalf("ClaimIdempotency() operation = %q, want %q", got.String(), "checkout")
+	}
+	if got := reflect.ValueOf(tx.complete).FieldByName("Operation"); !got.IsValid() {
+		t.Fatal("CompleteIdempotency() completion is missing Operation")
+	} else if got.String() != "checkout" {
+		t.Fatalf("CompleteIdempotency() operation = %q, want %q", got.String(), "checkout")
 	}
 }
 

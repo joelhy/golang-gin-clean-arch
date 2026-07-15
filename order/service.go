@@ -12,6 +12,8 @@ import (
 	"time"
 )
 
+const OperationCheckout = "checkout"
+
 type Service struct {
 	transactor Transactor
 	reader     Reader
@@ -54,6 +56,7 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 	err = s.transactor.WithinTransaction(ctx, func(tx Tx) error {
 		claim, err := tx.ClaimIdempotency(ctx, IdempotencyClaim{
 			UserID:      userID,
+			Operation:   OperationCheckout,
 			Key:         strings.TrimSpace(input.IdempotencyKey),
 			RequestHash: requestHash,
 			CreatedAt:   now,
@@ -89,6 +92,7 @@ func (s *Service) Create(ctx context.Context, userID uint64, input CreateInput) 
 		}
 		if err := tx.CompleteIdempotency(ctx, IdempotencyCompletion{
 			UserID:    userID,
+			Operation: OperationCheckout,
 			Key:       strings.TrimSpace(input.IdempotencyKey),
 			OrderID:   order.ID,
 			UpdatedAt: now,

@@ -121,6 +121,19 @@ func TestListForAdminKeepsRequestedUserScope(t *testing.T) {
 	}
 }
 
+func TestListDefaultsEmptySortBeforeDelegating(t *testing.T) {
+	reader := &fakeReader{}
+	svc := newTestService(t, fakeTransactor{tx: &fakeTx{}}, reader, fakeClock{now: fixedTime}, fakeNumbers{})
+
+	_, err := svc.List(t.Context(), Actor{UserID: 7}, ListFilter{Limit: 20})
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if reader.listFilter.Sort != "created_at" {
+		t.Fatalf("List() delegated sort = %q, want %q", reader.listFilter.Sort, "created_at")
+	}
+}
+
 func TestSortOrdersUsesStableOrdering(t *testing.T) {
 	items := []Order{
 		{ID: 2, Number: "B", Total: Money{Amount: 100, Currency: "USD"}, CreatedAt: fixedTime, UpdatedAt: fixedTime},
