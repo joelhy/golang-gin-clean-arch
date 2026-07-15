@@ -1,41 +1,38 @@
-# Build stage
-FROM golang:1.21-alpine AS builder
+ARG GO_IMAGE=golang:1.25-alpine
+ARG ALPINE_IMAGE=alpine:3.22
 
-# Set working directory
-WORKDIR /app
+# The defaults use public images, while CI or local builds can pass mirror images
+# without changing the Dockerfile when outbound registry access is slow/restricted.
+FROM ${GO_IMAGE} AS builder
 
-# Install git (required for go modules)
-RUN apk add --no-cache git
+WORKDIR /src
 
-# Copy go mod files
+RUN apk add --no-cache ca-certificates tzdata
+
 COPY go.mod go.sum ./
-
-# Download dependencies
 RUN go mod download
 
-# Copy source code
 COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/server ./cmd/server && \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/admin ./cmd/admin
 
-# Build the application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main cmd/main.go
+FROM ${ALPINE_IMAGE} AS runtime
 
-# Final stage
-FROM alpine:latest
+RUN apk add --no-cache ca-certificates tzdata && \
+    addgroup -S app && \
+    adduser -S -D -H -G app app
 
-# Install ca-certificates for HTTPS requests
-RUN apk --no-cache add ca-certificates tzdata
-
-# Set working directory
-WORKDIR /root/
-
-# Copy the binary from builder stage
-COPY --from=builder /app/main .
-
-# Copy environment file template
-COPY --from=builder /app/env.example .
-
-# Expose port
+USER app
 EXPOSE 8080
 
-# Command to run
-CMD ["./main"] 
+FROM runtime AS admin
+COPY --from=builder /out/admin /usr/local/bin/admin
+ENTRYPOINT ["/usr/local/bin/admin"]
+
+FROM runtime AS server
+COPY --from=builder /out/server /usr/local/bin/server
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+    CMD wget -qO- http://127.0.0.1:8080/health/ready >/dev/null || exit 1
+
+ENTRYPOINT ["/usr/local/bin/server"]
