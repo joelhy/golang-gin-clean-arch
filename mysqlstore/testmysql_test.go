@@ -3,6 +3,7 @@
 package mysqlstore
 
 import (
+	"fmt"
 	"net"
 	"strconv"
 	"testing"
@@ -12,6 +13,7 @@ import (
 	"clean-arch-gin/migrations"
 
 	mysqlconfig "github.com/go-sql-driver/mysql"
+	"github.com/moby/moby/api/types/network"
 	"github.com/testcontainers/testcontainers-go"
 	mysqlcontainer "github.com/testcontainers/testcontainers-go/modules/mysql"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -21,12 +23,24 @@ import (
 func newTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 
+	// SQL readiness probes intentionally connect while MySQL is still initializing.
+	// The returned errors drive the wait loop, so driver-level EOF logs add noise without useful signal.
+	if err := mysqlconfig.SetLogger(&mysqlconfig.NopLogger{}); err != nil {
+		t.Fatalf("mute MySQL readiness probe logs: %v", err)
+	}
+
 	container, err := mysqlcontainer.Run(
 		t.Context(),
 		"mysql:8.4",
 		mysqlcontainer.WithDatabase("clean_arch"),
-		testcontainers.WithWaitStrategy(
-			wait.ForLog("port: 3306  MySQL Community Server").WithStartupTimeout(2*time.Minute),
+		testcontainers.WithWaitStrategyAndDeadline(
+			3*time.Minute,
+			wait.ForSQL("3306/tcp", "mysql", func(host string, port network.Port) string {
+				// MySQL 8.4 logs both temporary and final server startup lines, and
+				// log phrasing can vary. SQL readiness proves the final server, test
+				// user, and database are actually usable before migrations run.
+				return fmt.Sprintf("test:test@tcp(%s:%s)/clean_arch?timeout=5s", host, port.Port())
+			}).WithStartupTimeout(3*time.Minute).WithPollInterval(time.Second),
 		),
 	)
 	testcontainers.CleanupContainer(t, container)
