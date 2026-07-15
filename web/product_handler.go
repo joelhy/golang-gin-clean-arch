@@ -114,6 +114,10 @@ func (h *productHandler) GetPublic(c *gin.Context) {
 }
 
 func (h *productHandler) Create(c *gin.Context) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionProductsWrite); !ok {
+		return
+	}
+
 	var req createProductRequest
 	if problem := decodeJSON(c, &req, 0); problem != nil {
 		writeFailure(c, http.StatusBadRequest, *problem)
@@ -138,6 +142,9 @@ func (h *productHandler) Create(c *gin.Context) {
 }
 
 func (h *productHandler) GetAdmin(c *gin.Context) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionProductsWrite); !ok {
+		return
+	}
 	id, problem := parseUintParam(c, "id")
 	if problem != nil {
 		writeFailure(c, http.StatusBadRequest, *problem)
@@ -152,6 +159,9 @@ func (h *productHandler) GetAdmin(c *gin.Context) {
 }
 
 func (h *productHandler) Update(c *gin.Context) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionProductsWrite); !ok {
+		return
+	}
 	id, problem := parseUintParam(c, "id")
 	if problem != nil {
 		writeFailure(c, http.StatusBadRequest, *problem)
@@ -183,6 +193,9 @@ func (h *productHandler) Update(c *gin.Context) {
 }
 
 func (h *productHandler) ListAdmin(c *gin.Context) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionProductsWrite); !ok {
+		return
+	}
 	query, problem := DecodePaginationQuery(c.Request.URL.Query(), QueryOptions{
 		DefaultLimit: 20,
 		AllowedSorts: []string{"id", "sku", "name", "status", "price", "created_at", "updated_at"},
@@ -220,9 +233,8 @@ func (h *productHandler) Unpublish(c *gin.Context) {
 }
 
 func (h *productHandler) AdjustStock(c *gin.Context) {
-	identity, ok := identityFromContext(c)
+	identity, _, ok := requireIdentityAndPermission(c, user.PermissionProductsStock)
 	if !ok {
-		writeFailure(c, http.StatusUnauthorized, Problem{Code: CodeAuthentication, Message: "authentication failed"})
 		return
 	}
 	id, problem := parseUintParam(c, "id")
@@ -251,6 +263,9 @@ func (h *productHandler) AdjustStock(c *gin.Context) {
 }
 
 func (h *productHandler) setProductStatus(c *gin.Context, publish bool) {
+	if _, _, ok := requireIdentityAndPermission(c, user.PermissionProductsWrite); !ok {
+		return
+	}
 	id, problem := parseUintParam(c, "id")
 	if problem != nil {
 		writeFailure(c, http.StatusBadRequest, *problem)
@@ -313,8 +328,4 @@ func formatProductTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339Nano)
-}
-
-func productActorFromIdentity(identity user.Identity) product.Actor {
-	return product.Actor{UserID: identity.UserID}
 }
