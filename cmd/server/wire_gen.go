@@ -20,17 +20,13 @@ import (
 
 // Injectors from wire.go:
 
-func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener) (serverRuntime, error) {
-	mainDatabaseResource, err := openDatabase(ctx, cfg, logger)
+func buildRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener, db databaseResource) (serverRuntime, error) {
+	db2 := gormDB(db)
+	userStore, err := mysqlstore.NewUserStore(db2)
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	db := gormDB(mainDatabaseResource)
-	userStore, err := mysqlstore.NewUserStore(db)
-	if err != nil {
-		return serverRuntime{}, err
-	}
-	sessionStore, err := mysqlstore.NewSessionStore(db)
+	sessionStore, err := mysqlstore.NewSessionStore(db2)
 	if err != nil {
 		return serverRuntime{}, err
 	}
@@ -60,7 +56,7 @@ func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logg
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	productStore, err := mysqlstore.NewProductStore(db)
+	productStore, err := mysqlstore.NewProductStore(db2)
 	if err != nil {
 		return serverRuntime{}, err
 	}
@@ -69,7 +65,7 @@ func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logg
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	orderStore, err := mysqlstore.NewOrderStore(db)
+	orderStore, err := mysqlstore.NewOrderStore(db2)
 	if err != nil {
 		return serverRuntime{}, err
 	}
@@ -79,7 +75,7 @@ func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logg
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	reportingStore, err := mysqlstore.NewReportingStore(db)
+	reportingStore, err := mysqlstore.NewReportingStore(db2)
 	if err != nil {
 		return serverRuntime{}, err
 	}
@@ -87,10 +83,10 @@ func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logg
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	handler, err := provideRouter(ctx, cfg, logger, mainDatabaseResource, authService, service, productService, orderService, reportingService)
+	handler, err := provideRouter(ctx, cfg, logger, db, authService, service, productService, orderService, reportingService)
 	if err != nil {
 		return serverRuntime{}, err
 	}
-	mainServerRuntime := provideServerRuntime(cfg, handler, listener, mainDatabaseResource)
+	mainServerRuntime := provideServerRuntime(cfg, handler, listener, db)
 	return mainServerRuntime, nil
 }

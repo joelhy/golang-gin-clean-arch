@@ -103,6 +103,25 @@ func listen(cfg config.Config) (net.Listener, error) {
 	return net.Listen("tcp", cfg.HTTP.Address)
 }
 
+func initializeRuntime(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener) (serverRuntime, error) {
+	db, err := openDatabase(ctx, cfg, logger)
+	if err != nil {
+		return serverRuntime{}, err
+	}
+	return initializeRuntimeFromDatabase(ctx, cfg, logger, listener, db)
+}
+
+func initializeRuntimeFromDatabase(ctx context.Context, cfg config.Config, logger *slog.Logger, listener net.Listener, db databaseResource) (serverRuntime, error) {
+	runtime, err := buildRuntime(ctx, cfg, logger, listener, db)
+	if err != nil {
+		// Wire can fail after the database pool is already open. Because no
+		// serverRuntime is returned on that path, close here so startup failures
+		// do not leak a pool that run() would otherwise own.
+		return serverRuntime{}, errors.Join(err, closeRuntime(db.Close))
+	}
+	return runtime, nil
+}
+
 func provideServerRuntime(cfg config.Config, handler http.Handler, listener net.Listener, db databaseResource) serverRuntime {
 	return serverRuntime{
 		Config:   cfg,

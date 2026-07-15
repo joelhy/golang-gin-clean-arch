@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net"
 	"net/http"
 	"sync"
@@ -139,6 +140,29 @@ func TestRunReturnsShutdownAndCloseErrors(t *testing.T) {
 	}
 	if !errors.Is(err, closeErr) {
 		t.Fatalf("run() error = %v, want close error", err)
+	}
+}
+
+func TestInitializeRuntimeFromDatabaseClosesDBWhenProviderFails(t *testing.T) {
+	closeErr := errors.New("close failed")
+	var closes atomic.Int32
+
+	_, err := initializeRuntimeFromDatabase(t.Context(), testConfig(), slog.Default(), failingListener{}, databaseResource{
+		DB: nil,
+		Close: func() error {
+			closes.Add(1)
+			return closeErr
+		},
+	})
+
+	if err == nil {
+		t.Fatal("initializeRuntimeFromDatabase() error = nil, want provider failure")
+	}
+	if !errors.Is(err, closeErr) {
+		t.Fatalf("initializeRuntimeFromDatabase() error = %v, want close error", err)
+	}
+	if closes.Load() != 1 {
+		t.Fatalf("closes = %d, want 1", closes.Load())
 	}
 }
 
